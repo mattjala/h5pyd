@@ -26,6 +26,7 @@ else:
 
 cfg = Config()
 
+
 #
 # Usage
 #
@@ -38,12 +39,12 @@ def usage():
     print("Description:")
     print("    Get status information from server")
     print("")
-    
+
     print("Options:")
     for name in option_names:
         help_msg = cfg.get_help_message(name)
         if help_msg:
-            print(f"    {help_msg}")  
+            print(f"    {help_msg}")
     print("")
     print("examples:")
     print(f"   {cmd} -e http://hsdshdflab.hdfgroup.org")
@@ -52,8 +53,9 @@ def usage():
     print("")
     sys.exit()
 
+
 #
-#
+# getUpTime
 #
 def getUpTime(start_time):
     now = int(time.time())
@@ -65,13 +67,13 @@ def getUpTime(start_time):
     mins = sec // 60
     sec -= 60 * mins
     if days:
-        ret_str = "{} days, {} hours {} min {} sec".format(days, hrs, mins, sec)
+        ret_str = f"{days} days, {hrs} hours {mins} min {sec} sec"
     elif hrs:
-        ret_str = "{} hours {} min {} sec".format(hrs, mins, sec)
+        ret_str = f"{hrs} hours {mins} min {sec} sec"
     elif mins:
-        ret_str = "{} min {} sec".format(mins, sec)
+        ret_str = f"{mins} min {sec} sec"
     else:
-        ret_str = "{} sec".format(sec)
+        ret_str = f"{sec} sec"
 
     return ret_str
 
@@ -85,17 +87,21 @@ def getServerInfo(cfg):
         info = h5pyd.getServerInfo(
             username=username, password=password, endpoint=endpoint
         )
-        print("server name: {}".format(info["name"]))
+        info_name = info["name"]
+        print(f"server name: {info_name}")
         if "state" in info:
-            print("server state: {}".format(info["state"]))
+            info_state = info["state"]
+            print(f"server state: {info_state}")
         print(f"endpoint: {endpoint}")
         if "isadmin" in info and info["isadmin"]:
             admin_tag = "(admin)"
         else:
             admin_tag = ""
 
-        print("username: {} {}".format(info["username"], admin_tag))
-        print("password: {}".format(info["password"]))
+        info_username = info["username"]
+        print(f"username: {info_username} {admin_tag}")
+        info_password = info["password"]
+        print(f"password: {info_password}")
         if info["state"] == "READY":
             try:
                 home_folder = getHomeFolder()
@@ -105,15 +111,15 @@ def getServerInfo(cfg):
                 print("home: NO ACCESS")
 
         if "hsds_version" in info:
-            print("server version: {}".format(info["hsds_version"]))
+            info_hsds_version = info["hsds_version"]
+            print(f"server version: {info_hsds_version}")
         if "node_count" in info:
-            print("node count: {}".format(info["node_count"]))
-        elif "h5serv_version" in info:
-            print("server version: {}".format(info["h5serv_version"]))
+            info_node_count = info["node_count"]
+            print(f"node count: {info_node_count}")
         if "start_time" in info:
             uptime = getUpTime(info["start_time"])
             print(f"up: {uptime}")
-        print("h5pyd version: {}".format(h5pyd.version.version))
+        print(f"h5pyd version: {h5pyd.version.version}")
 
     except IOError as ioe:
         if ioe.errno == 401:
@@ -150,10 +156,10 @@ def getHomeFolder():
                     path, username=username, password=password, endpoint=endpoint
                 )
             except IOError as ioe:
-                logging.info("find home folder - got ioe: {}".format(ioe))
+                logging.info(f"find home folder - got ioe: {ioe}")
                 continue
             except Exception as e:
-                logging.warn("find home folder - got exception: {}".format(e))
+                logging.warning(f"find home folder - got exception: {e}")
                 continue
             if f.owner == username:
                 homefolder = path
@@ -187,13 +193,12 @@ def main():
     if domains:
         sys.exit("Use the hsstat command to get information about about a folder or domain ")
 
-
     if not cfg["hs_endpoint"]:
         logging.error("endpoint not set")
         usage()
-    
+
     getServerInfo(cfg)
-    
+
 
 if __name__ == "__main__":
     main()

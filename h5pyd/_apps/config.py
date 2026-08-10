@@ -38,14 +38,43 @@ default_cfg = {
         "flags": ["--api_key",],
         "help": "user api key",
         "choices": ["API_KEY"]
-    }, 
+    },
     "hs_bucket": {
         "default": None,
         "flags": ["--bucket",],
         "help": "storage Bucket to use (S3 Bucket, Azure Container, or top-level directory)",
         "choices": ["BUCKET",]
     },
-
+    "hs_ad_app_id": {
+        "default": None,
+        "flags": ["--ad-app-id",],
+        "help": "Azure AD Application ID",
+    },
+    "hs_ad_tenant_id": {
+        "default": None,
+        "flags": ["--ad-tenant-id",],
+        "help": "Azure AD Tenant ID",
+    },
+    "hs_ad_resource_id": {
+        "default": None,
+        "flags": ["--ad-resource-id",],
+        "help": "Azure AD Resource ID",
+    },
+    "hs_keycloak_client_id": {
+        "default": None,
+        "flags": ["--keycloak-client-id",],
+        "help": "Keycloak Client ID",
+    },
+    "hs_keycloak_realm": {
+        "default": None,
+        "flags": ["--keycloak-realm",],
+        "help": "Keycloak Realm",
+    },
+    "hs_keycloak_uri": {
+        "default": None,
+        "flags": ["--keycloak-uri",],
+        "help": "Keycloak instance base URL",
+    },
     "loglevel": {
         "default": "error",
         "flags": ["--loglevel",],
@@ -67,10 +96,11 @@ default_cfg = {
         "default": False,
         "flags": ["--ignore",],
         "help": "don't exit on error"
-    } 
+    }
 }
 
 hscmds = ("hsinfo", "hsconfigure", "hsls", "hstouch", "hsload", "hsget", "hsacl", "hsrm", "hsdiff")
+
 
 class Config:
     """
@@ -126,8 +156,12 @@ class Config:
                         continue
                     k = fields[0].strip()
                     v = fields[1].strip()
+                    words = v.split()
+                    if len(words) > 1 and words[1].startswith("#"):
+                        # ignore any inline comment
+                        v = words[0]
                     if k not in self._names:
-                        raise ValueError(f"undefined option: {name}")
+                        raise ValueError(f"undefined option: {k}")
                     if k in self._choices:
                         choices = self._choices[k]
                         if len(choices) > 1 and v not in self._choices:
@@ -163,7 +197,7 @@ class Config:
         """ Set a config item """
         if name not in self._names:
             self._names.append(name)
-        self._values[name] = value 
+        self._values[name] = value
         if flags is not None:
             self._flags[name] = flags
             for flag in flags:
@@ -175,7 +209,7 @@ class Config:
 
     def __setitem__(self, name, value):
         self.setitem(name, value)
-     
+
     def __len__(self):
         return len(self._names)
 
@@ -212,15 +246,14 @@ class Config:
                 msg += f"{cmd}, "
         msg = msg[:-2]  # remove trailing comma
         return msg
-        
 
     def get_help_message(self, name):
-        help_text= self.get_help(name)
+        help_text = self.get_help(name)
         flags = self.get_flags(name)
         choices = self.get_choices(name)
         if not help_text or len(flags) == 0:
             return None
-        
+
         msg = flags[0]
         for i in range(1, len(flags)):
             msg += f", {flags[i]}"
@@ -228,19 +261,18 @@ class Config:
             if len(choices) == 1:
                 msg += f" {choices[0]}"
             else:
-                msg += " {" 
+                msg += " {"
                 for choice in choices:
                     msg += f"{choice}|"
                 msg = msg[:-1]
                 msg += "}"
         if len(msg) < 40:
-            pad = " "*(40 - len(msg))
+            pad = " " * (40 - len(msg))
             msg += pad
-        
+
         msg += f" {help_text}"
-        
+
         return msg
-        
 
     def get_nargs(self, name):
         choices = self._choices.get(name)
@@ -260,7 +292,7 @@ class Config:
 
     def set_cmd_flags(self, args, allow_post_flags=False):
         """ process any command line options
-            return any place argument as a list 
+            return any place argument as a list
         """
         options = []
         argn = 0
@@ -268,7 +300,7 @@ class Config:
             arg = args[argn]
             val = None
             if len(args) > argn + 1:
-                val = args[argn+1]
+                val = args[argn + 1]
             if not arg.startswith("-"):
                 options.append(arg)
                 argn += 1
@@ -299,7 +331,7 @@ class Config:
                     self._values[name] = val
                     argn += 2
         return options
-    
+
     def get_loglevel(self):
         val = self._values["loglevel"]
         val = val.upper()
@@ -329,13 +361,3 @@ class Config:
             logging.info(msg)
         if self._values.get("verbose"):
             print(msg)
-         
-    
-
-
-
-
-
-
-
-

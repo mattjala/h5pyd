@@ -17,7 +17,7 @@ import json
 import time
 import logging
 from .httpconn import HttpConn
-from .config import Config
+from .. import config
 
 
 class Folder:
@@ -117,8 +117,6 @@ class Folder:
 
         """
 
-        self.log = logging.getLogger("h5pyd")
-
         if len(domain_name) == 0:
             raise ValueError("Invalid folder name")
 
@@ -143,7 +141,7 @@ class Folder:
         if mode is None:
             mode = "r"
 
-        cfg = Config()  # pulls in state from a .hscfg file (if found).
+        cfg = config.get_config()  # pulls in state from a .hscfg file (if found).
 
         if endpoint is None and "hs_endpoint" in cfg:
             endpoint = cfg["hs_endpoint"]
@@ -222,7 +220,7 @@ class Folder:
         elif rsp.status_code != 200:
             # folder must exist
             if rsp.status_code < 500:
-                self.log.warning("status_code: {}".format(rsp.status_code))
+                self.log.warning(f"folder put status_code: {rsp.status_code}")
             else:
                 self.log.error("status_code: {}".format(rsp.status_code))
             raise IOError(rsp.status_code, rsp.reason)

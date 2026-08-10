@@ -1,21 +1,20 @@
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/hdfgroup/h5pyd)
+
 h5pyd
 =====
 
-.. image:: https://travis-ci.org/HDFGroup/h5pyd.svg?branch=master
-    :target: https://travis-ci.org/HDFGroup/h5pyd
-
-Python client library for HDF5 REST interface
+Python client library for HSDS
 
 
 Introduction
 ------------
-This repository contains library, test, and examples of h5pyd - a Python package for the
-HDF REST interface.
+This repository contains library, test, and examples of h5pyd - a Python package for HSDS 
+(Highly Scalable Data Service), or other HDF REST compatible web services.
 
-The library is provides a high-level interface to the REST specification that is generally
+The h5pyd library provides a high-level interface to the REST specification that is generally
 easier to use than invoking http calls directly.
 
-The package is based on the popular h5py package and aims to be source compatible with
+This package is based on the popular h5py package and aims to be source compatible with
 the h5py high level interface.
 
 
@@ -31,7 +30,6 @@ Related Projects
 ----------------
 
 * HSDS: https://github.com/HDFGroup/hsds
-* HDF Server: https://github.com/HDFGroup/h5serv
 * HDF5-JSON: https://github.com/HDFGroup/hdf5-json
 * h5py: https://github.com/h5py/h5py
 * REST API Documentation: https://github.com/HDFGroup/hdf-rest-api
@@ -45,26 +43,22 @@ Via pip::
 
 From a release tarball or Git checkout::
 
-   python setup.py install
+   pip install .
 
-By default the examples look for a local instance of HSDS.  See the  https://github.com/HDFGroup/hsds
-for instructions on installing and running HSDS.
+Run `hsconfigure` to setup the connection info (endpoint, username, and password) to HSDS.  
+If you don't have access to an HSDS instance, you can easily setup your own HSDS instance.
+See  https://github.com/HDFGroup/hsds for instructions on installing and running HSDS
+on locally or in the cloud.
 
-These tests are also to designed to work with HSDS (see https://github.com/HDFGroup/hsds).  Install HSDS locally, or set environment variables (see next section)
-to point to an existing HSDS instance.
+Direct Mode
+-----------
+The h5pyd package can be used without an explicit HSDS connection.  Rather, the storage system will
+be accessed directly.
+  
+To use in direct mode, set the HS_ENDPOINT to "local" (or "local[n]" where n is the number of desired
+sub-processes).  
 
-h5pyd can all be run in serverless mode with either AWS Lambda or direct mode (storage system accessed directly).
-
-To use with AWS Lambda, set the HS_ENDPOINT to: "http+lambda://hslambda" where "hslambda" is the name
-of the lambda function.  When using AWS Lambda some additional environment variables need to be set:
-
-* ``AWS_LAMBDA_GATEWAY`` - AWS Lambda endpoint, e.g.: ``https://lambda.us-west-2.amazonaws.com``
-* ``AWS_REGION`` - Region where the Lambda function is installed, e.g.: ``us-west-2``
-* ``AWS_SECRET_ACCESS_KEY`` - Your AWS secret access AWS_SECRET_ACCESS_KEY
-* ``AWS_ACCESS_KEY_ID`` - Your AWS access key ID
-
-
-To use in direct mode, set the HS_ENDPOINT to "local".  For direct mode, some additional environment
+For direct mode, some additional environment
 variables are needed to be defined:
 
 * ``BUCKET_NAME`` - name of the S3 Bucket, Azure Container, or Posix top level folder
@@ -84,10 +78,11 @@ To use "local" with Posix storage, define these variables:
 
 * ``ROOT_DIR`` - The top level directory used for storage (i.e. the parent directory of "buckets")
 
+
 H5PYD Command Line Apps
 -----------------------
 
-Serveral utility applications are included with this package:
+Several utility applications are included with this package:
 
 * ``hsconfigure`` - save endpoint, username, and password in config files
 * ``hsacl`` - read/update ACL (access control list) for a given folder or domain
@@ -105,7 +100,12 @@ Use the ``--help`` option to get usage information for each command.
 
 Testing
 -------
-Setup the following environment variables that inform h5pyd which endpoint and username to use:
+
+By default the test suite will attempt to connect to a local instance of HSDS with the 
+`http://localhost:5101` endpoint.
+
+Use the following environment variables as needed to modify the default configuration
+for the test suite:
 
 * ``HS_ENDPOINT`` - "http://127.0.0.1:5000" for HSDS installed locally or appropriate remote endpoint
 * ``HS_USERNAME`` - "test_user1" or your preferred username

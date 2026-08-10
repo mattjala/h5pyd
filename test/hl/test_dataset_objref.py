@@ -21,7 +21,6 @@ from common import ut, TestCase
 
 class TestObjRef(TestCase):
 
-
     def test_create(self):
         filename = self.getFileName("objref_test")
         print(filename)
@@ -30,9 +29,6 @@ class TestObjRef(TestCase):
         self.assertTrue(f.id.id is not None)
         self.assertTrue('/' in f)
         r = f['/']
-        is_h5serv = False
-        if isinstance(f.id.id, str) and not f.id.id.startswith("g-"):
-            is_h5serv = True  # h5serv doesn't have support for objref datasets yet
 
         # create subgroup g1
         r.create_group('g1')
@@ -69,10 +65,6 @@ class TestObjRef(TestCase):
         self.assertTrue(dt.metadata['ref'] is h5py.Reference)
         ref = h5py.check_dtype(ref=dt)
         self.assertEqual(ref, h5py.Reference)
-
-
-        if is_h5serv:
-            return  # ref types not supported in h5serv
 
         # create dataset of ref types
         dset = g1.create_dataset('myrefs', (10,), dtype=dt)
@@ -119,7 +111,6 @@ class TestObjRef(TestCase):
         self.assertEqual(obj.name, "/g2/d1")
         f.close()
 
-
         # try opening in read-mode
         f = h5py.File(filename, 'r')
         g1 = f['/g1']
@@ -141,33 +132,23 @@ class TestObjRef(TestCase):
             self.assertEqual(obj.id.id, d1.id.id)  # ref to d1
         self.assertEqual(obj.name, "/g2/d1")
 
-
-
     def test_delete(self):
         filename = self.getFileName("objref_delete_test")
         print(filename)
         f = h5py.File(filename, 'w')
         self.assertTrue(f.id.id is not None)
         self.assertTrue('/' in f)
-        is_h5serv = False
-        if isinstance(f.id.id, str) and not f.id.id.startswith("g-"):
-            is_h5serv = True  # h5serv doesn't have support for objref datasets yet
 
         # create a dataset
-        dset = f.create_dataset('dset', data=[1,2,3])
+        dset = f.create_dataset('dset', data=[1, 2, 3])
         dset_ref = dset.ref
 
-        if not is_h5serv:
-            f.attrs["dset_ref"] = dset_ref
-            del f['dset']
-            try:
-                obj = f[dset_ref]
-                if config.get("use_h5py"):
-                    # TBD - HSDS is not triggering this exception since the object
-                    # is not being deleted.
-                    self.assertTrue(False)
-            except ValueError:
-                pass # expected
+        f.attrs["dset_ref"] = dset_ref
+        del f['dset']
+        try:
+            f[dset_ref]
+        except ValueError:
+            pass  # expected
 
         f.close()
 

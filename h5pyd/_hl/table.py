@@ -12,14 +12,14 @@
 
 from __future__ import absolute_import
 import numpy
-from .base import  _decode   
+from .base import _decode
 from .base import bytesToArray
 from .dataset import Dataset
 from .objectid import DatasetID
 from . import selections as sel
 from .h5type import Reference
 from .h5type import check_dtype
-from .h5type import getQueryDtype   
+from .h5type import getQueryDtype
 
 
 class Cursor():
@@ -64,37 +64,37 @@ class Cursor():
                 if nrows - indx < read_count:
                     read_count = nrows - indx
                 if self._query is None:
-                    arr = self._table[indx+self._start:read_count+indx+self._start]
+                    arr = self._table[indx + self._start:read_count + indx + self._start]
                 else:
                     # call table to return query result
                     if query_complete:
                         arr = None  # nothing more to fetch
                     else:
-                        arr = self._table.read_where(self._query, start=indx+self._start, limit=read_count)
+                        arr = self._table.read_where(self._query, start=indx + self._start, limit=read_count)
                         if arr is not None and arr.shape[0] < read_count:
                             query_complete = True  # we've gotten all the rows
-            if arr is not None and indx%self._buffer_rows < arr.shape[0]:
-                yield arr[indx%self._buffer_rows]
+            if arr is not None and indx % self._buffer_rows < arr.shape[0]:
+                yield arr[indx % self._buffer_rows]
+
 
 class Table(Dataset):
 
     """
         Represents an HDF5 dataset
     """
-    def __init__(self, bind):
+    def __init__(self, bind, track_order=None):
         """ Create a new Table object by binding to a low-level DatasetID.
         """
 
         if not isinstance(bind, DatasetID):
-            raise ValueError("%s is not a DatasetID" % bind)
-        Dataset.__init__(self, bind)
+            raise ValueError(f"{bind} is not a DatasetID")
+        Dataset.__init__(self, bind, track_order=track_order)
 
         if len(self._dtype) < 1:
             raise ValueError("Table type must be compound")
 
         if len(self._shape) > 1:
             raise ValueError("Table must be one-dimensional")
-
 
     @property
     def colnames(self):
@@ -118,7 +118,7 @@ class Table(Dataset):
             step = 1
         arr = self[start:stop:step]
         if field is not None:
-            #TBD - read just the field once the service supports it
+            # TBD - read just the field once the service supports it
             tmp = arr[field]
             arr = tmp
         if out is not None:
@@ -127,12 +127,12 @@ class Table(Dataset):
         else:
             return arr
 
-
-
-    def read_where(self, condition, condvars=None, field=None, start=None, stop=None, step=None, limit=0, include_index=True):
+    def read_where(self, condition, condvars=None, field=None,
+                   start=None, stop=None, step=None, limit=0, include_index=True):
         """Read rows from table using pytable-style condition
         """
         names = ()  # todo
+
         def readtime_dtype(basetype, names):
             """ Make a NumPy dtype appropriate for reading """
 
@@ -143,8 +143,8 @@ class Table(Dataset):
                 raise ValueError("Field names only allowed for compound types")
 
             for name in names:  # Check all names are legal
-                if not name in basetype.names:
-                    raise ValueError("Field %s does not appear in this type." % name)
+                if name not in basetype.names:
+                    raise ValueError(f"Field {name} does not appear in this type.")
 
             return numpy.dtype([(name, basetype.fields[name][0]) for name in names])
 
@@ -158,7 +158,6 @@ class Table(Dataset):
         # todo - will need the following once we have binary transfers
         # mtype = h5t.py_create(new_dtype)
         rsp_type = getQueryDtype(mtype)
-        
 
         # Perform the dataspace selection
         if start or stop:
@@ -189,24 +188,24 @@ class Table(Dataset):
             params["query"] = condition
             if limit > 0:
                 params["Limit"] = limit - total_rows
-            self.log.info("req - cursor: {} page_size: {}".format(cursor, page_size))
-            end_row = cursor+page_size
+            self.log.info(f"req - cursor: {cursor} page_size: {page_size}")
+            end_row = cursor + page_size
             if end_row > stop:
                 end_row = stop
             selection_arg = slice(cursor, end_row)
             selection = sel.select(self, selection_arg)
 
             sel_param = selection.getQueryParam()
-            self.log.debug("query param: {}".format(sel_param))
+            self.log.debug(f"query param: {sel_param}")
             if sel_param:
                 params["select"] = sel_param
             try:
-                self.log.debug("params: {}".format(params))
+                self.log.debug(f"params: {params}")
                 rsp = self.GET(req, params=params)
                 if isinstance(rsp, bytes):
                     # binary response
-                    arr = bytesToArray(rsp, rsp_type, None) 
-                    count = len(arr)   
+                    arr = bytesToArray(rsp, rsp_type, None)
+                    count = len(arr)
                     self.log.info(f"got {count} rows binary data")
                 else:
                     values = rsp["value"]
@@ -229,8 +228,8 @@ class Table(Dataset):
                         else:
                             e = values[i]
                         arr[i] = tuple(e)
-                        
-                    self.log.info("got {} rows".format(count))
+
+                    self.log.info(f"got {count} rows")
                 total_rows += count
                 data.append(arr)
 
@@ -242,13 +241,13 @@ class Table(Dataset):
                     # if it is not already relatively small (1024)
                     page_size //= 2
                     page_size += 1  # bump up to avoid tiny pages in the last iteration
-                    self.log.info("Got 413, reducing page_size to: {}".format(page_size))
+                    self.log.info(f"Got 413, reducing page_size to: {page_size}")
                 else:
                     # otherwise, just raise the exception
-                    self.log.info("Unexpected exception: {}".format(ioe.errno))
+                    self.log.info(f"Unexpected exception: {ioe.errno}")
                     raise ioe
             if cursor >= stop or (limit > 0 and total_rows == limit):
-                self.log.info("completed iteration, returning: {} rows".format(len(data)))
+                self.log.info(f"completed iteration, returning: {len(data)} rows")
                 break
 
         # need some special conversion for compound types --
@@ -263,13 +262,12 @@ class Table(Dataset):
             start = 0
             for arr in data:
                 nrows = len(arr)
-                ret_arr[start:(start+nrows)] = arr[:]
+                ret_arr[start:(start + nrows)] = arr[:]
                 start += nrows
         else:
             ret_arr = data[0]
 
         return ret_arr
-
 
     def update_where(self, condition, value, start=None, stop=None, step=None, limit=None):
         """Modify rows in table using pytable-style condition
@@ -317,12 +315,10 @@ class Table(Dataset):
 
         return arr
 
-    def create_cursor(self, condition=None,  start=None, stop=None):
+    def create_cursor(self, condition=None, start=None, stop=None):
         """Return a cursor for iteration
         """
         return Cursor(self, query=condition, start=start, stop=stop)
-
-
 
     def append(self, rows):
         """ Append rows to end of table
@@ -344,7 +340,7 @@ class Table(Dataset):
         try:
             val_dtype = val.dtype
         except AttributeError:
-            pass # not a numpy object, just leave dtype as None
+            pass  # not a numpy object, just leave dtype as None
 
         if isinstance(val, Reference):
             # h5pyd References are just strings
@@ -379,7 +375,7 @@ class Table(Dataset):
             # TBD - need to handle cases where the type shape is different
             self.log.debug("got numpy array")
             if val.dtype != self.dtype and val.dtype.shape == self.dtype.shape:
-                self.log.info("converting {} to {}".format(val.dtype, self.dtype))
+                self.log.info(f"converting {val.dtype} to {self.dtype}")
                 # convert array
                 tmp = numpy.empty(val.shape, dtype=self.dtype)
                 tmp[...] = val[...]
@@ -387,8 +383,8 @@ class Table(Dataset):
         else:
             val = numpy.asarray(val, order='C', dtype=self.dtype)
 
-        self.log.debug("rows shape: {}".format(val.shape))
-        self.log.debug("data dtype: {}".format(val.dtype))
+        self.log.debug(f"rows shape: {val.shape}")
+        self.log.debug(f"data dtype: {val.dtype}")
 
         if len(val.shape) != 1:
             raise ValueError("rows must be one-dimensional")
@@ -400,7 +396,6 @@ class Table(Dataset):
         params = {}
         body = {}
 
-
         format = "json"
 
         if use_base64:
@@ -408,14 +403,13 @@ class Table(Dataset):
             # server is HSDS, use binary data, use param values for selection
             format = "binary"
             body = val.tobytes()
-            self.log.debug("writing binary data, {} bytes".format(len(body)))
+            self.log.debug(f"writing binary data, {len(body)} bytes")
             params["append"] = numrows
         else:
             if type(val) is not list:
                 val = val.tolist()
             val = _decode(val)
-            self.log.debug("writing json data, {} elements".format(len(val)))
-            self.log.debug("data: {}".format(val))
+            self.log.debug(f"writing json data, {len(val)} elements")
             body['value'] = val
             body['append'] = numrows
 

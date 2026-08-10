@@ -16,11 +16,12 @@ else:
 
 cfg = Config()
 
+
 def intToStr(n):
     if cfg["human_readable"]:
-        s = "{:,}".format(n)
+        s = f"{n:,}"
     else:
-        s = "{}".format(n)
+        s = f"{n}"
     return s
 
 
@@ -37,9 +38,9 @@ def format_size(n):
             break
         n /= 1024
     if symbol == 'B':
-        return "{:7}B".format(n)
+        return f"{n:7}B"
     else:
-        return "{:7.1f}{}".format(n, symbol)
+        return f"{n:7.1f}{symbol}"
 
 
 def getShapeText(dset):
@@ -80,17 +81,17 @@ def visititems(name, grp, visited):
             except IOError:
                 # object deleted but hardlink left?
                 desc = "{Missing hardlink object}"
-                print("{0:24} {1} {2}".format(item_name, class_name, desc))
+                print(f"{item_name:24} {class_name} {desc}")
 
         elif class_name == "SoftLink":
             desc = '{' + item.path + '}'
-            print("{0:24} {1} {2}".format(item_name, class_name, desc))
+            print(f"{item_name:24} {class_name} {desc}")
         elif class_name == "ExternalLink":
             desc = '{' + item.path + '//' + item.filename + '}'
-            print("{0:24} {1} {2}".format(item_name, class_name, desc))
+            print(f"{item_name:24} {class_name} {desc}")
         else:
             desc = '{Unknown Link Type}'
-            print("{0:24} {1} {2}".format(item_name, class_name, desc))
+            print(f"{item_name:24} {class_name} {desc}")
 
 
 def getTypeStr(dt):
@@ -106,17 +107,16 @@ def dump(name, obj, visited=None):
         obj_id = obj.id.id
         if visited and obj_id in visited:
             same_as = visited[obj_id]
-            print("{0:24} {1}, same as {2}".format(name, class_name, same_as))
+            print(f"{name:24} {class_name}, same as {same_as}")
             return
     elif class_name in ("ExternalLink", "SoftLink"):
         pass
     else:
-        raise TypeError("unexpected classname: {}".format(class_name))
+        raise TypeError(f"unexpected classname: {class_name}")
 
     is_dataset = False
     if class_name in ("Dataset", "Table"):
         is_dataset = True
-
 
     if is_dataset:
         desc = getShapeText(obj)
@@ -131,46 +131,75 @@ def dump(name, obj, visited=None):
         desc = '{' + obj.filename + '//' + obj.path + '}'
 
     if desc is None:
-        print("{0} {1}".format(name, class_name))
+        print(f"{name} {class_name}")
     else:
-        print("{0} {1} {2}".format(name, class_name, desc))
+        print(f"{name} {class_name} {desc}")
 
     if cfg["verbose"] and obj_id is not None:
-        print("    {0:>32}: {1}".format("UUID", obj_id))
+        uuid_str = "UUID"
+        print(f"    {uuid_str:>32}: {obj_id}")
 
     if cfg["verbose"] and is_dataset and obj.shape is not None \
             and obj.chunks is not None:
         chunk_size = obj.dtype.itemsize
-        
+
         if isinstance(obj.id.layout, dict):
             # H5D_CHUNKED_REF layout
             chunk_dims = obj.id.layout["dims"]
-            storage_desc = "Storage " + obj.id.layout["class"]
+            obj_layout = obj.id.layout["class"]
         else:
             chunk_dims = obj.chunks
-            storage_desc = "Storage H5D_CHUNKED"
-        for chunk_dim in chunk_dims:
+            obj_layout = "H5D_CHUNKED"
+        storage_desc = f"Storage {obj_layout}"
+        max_chunk_count = 1
+        rank = len(obj.shape)
+        for i in range(rank):
+            extent = obj.shape[i]
+            chunk_dim = chunk_dims[i]
             chunk_size *= chunk_dim
+            max_chunk_count *= -(-extent // chunk_dim)
         dset_size = obj.dtype.itemsize
         for dim_extent in obj.shape:
             dset_size *= dim_extent
 
-        num_chunks = obj.num_chunks
-        allocated_size = obj.allocated_size
+        if obj_layout == "H5D_CHUNKED_REF_INDIRECT":
+            chunk_table_id = obj.id.layout["chunk_table"]
+            chunk_table = obj.file[f"datasets/{chunk_table_id}"]
+            num_chunks = int(np.prod(chunk_table.shape))
+            chunk_table_elements = chunk_table[...].reshape((num_chunks,))
+            num_linked_chunks = 0
+            allocated_size = 0
+            for e in chunk_table_elements:
+                chunk_offset = e[0]
+                chunk_size = e[1]
+                if chunk_offset > 0 and chunk_size > 0:
+                    num_linked_chunks += 1
+                    allocated_size += chunk_size
+            num_chunks = num_linked_chunks
+            chunk_type = "linked"
+
+        else:
+            num_chunks = obj.num_chunks
+            allocated_size = obj.allocated_size
+            chunk_type = "allocated"
+
         if num_chunks is not None and allocated_size is not None:
-            fstr = "    {0:>32}: {1} {2} bytes, {3} allocated chunks"
-            print(fstr.format("Chunks", chunk_dims, intToStr(chunk_size),
-                              intToStr(num_chunks)))
+            fstr = "    {0:>32}: {1} {2} bytes, {3}/{4} {5} chunks"
+
+            s = fstr.format("Chunks", chunk_dims, intToStr(chunk_size), intToStr(num_chunks),
+                            intToStr(max_chunk_count), chunk_type)
+            print(s)
             if dset_size > 0:
                 utilization = allocated_size / dset_size
-                fstr = "    {0:>32}: {1} logical bytes, {2} allocated bytes, {3:.2f}% utilization"
+                fstr = "    {0:>32}: {1} logical bytes, {2} {3} bytes, {4:.2f}% utilization"
                 print(fstr.format(storage_desc, intToStr(dset_size),
                                   intToStr(allocated_size),
+                                  chunk_type,
                                   utilization * 100.0))
             else:
-                fstr = "    {0:>32}: {1} logical bytes, {2} allocated bytes"
+                fstr = "    {0:>32}: {1} logical bytes, {2} {3} bytes"
                 print(fstr.format(storage_desc, intToStr(dset_size),
-                                  intToStr(allocated_size)))
+                                  intToStr(allocated_size), chunk_type))
 
         else:
             # verbose info not available, just show the chunk layout
@@ -178,7 +207,7 @@ def dump(name, obj, visited=None):
             print(fstr.format("Chunks", chunk_dims, intToStr(chunk_size)))
 
         # show filters (if any)
-        # currently HSDS only supports the shuffle filter (not fletcher32 or 
+        # currently HSDS only supports the shuffle filter (not fletcher32 or
         # scaleoffset), so just check for shuffle and whatever compressor may
         # be applied
         filter_number = 0
@@ -200,21 +229,7 @@ def dump(name, obj, visited=None):
 
     if cfg["showattrs"] and class_name in ("Dataset", "Table", "Group", "Datatype"):
         # dump attributes for the object
-        for attr_name in obj.attrs:
-            attr = obj.attrs[attr_name]
-            el = "..."  # show this if the attribute is too large
-            if isinstance(attr, np.ndarray):
-                rank = len(attr.shape)
-            else:
-                rank = 0  # scalar data
-            if rank > 1:
-                val = "[" * rank + el + "]" * rank
-                print("   attr: {0:24} {1}".format(attr_name, val))
-            elif rank == 1 and attr.shape[0] > 1:
-                val = "[{},{}]".format(attr[0], el)
-                print("   attr: {0:24} {1}".format(attr_name, val))
-            else:
-                print("   attr: {0:24} {1}".format(attr_name, attr))
+        dumpAttrs(obj)
 
     if visited is not None and obj_id is not None:
         visited[obj_id] = name
@@ -248,7 +263,8 @@ def dumpACL(acl):
         perms += 'p'
     else:
         perms += '-'
-    print("    acl: {0:24} {1}".format(acl["userName"], perms))
+    acl_username = acl["username"]
+    print(f"    acl: {acl_username:24} {perms}")
 
 
 def dumpAcls(obj):
@@ -262,11 +278,31 @@ def dumpAcls(obj):
         dumpACL(acl)
 
 
+def dumpAttrs(obj):
+    """ print attributes of the given obj """
+
+    for attr_name in obj.attrs:
+        attr = obj.attrs[attr_name]
+        el = "..."  # show this if the attribute is too large
+        if isinstance(attr, np.ndarray):
+            rank = len(attr.shape)
+        else:
+            rank = 0  # scalar data
+        if rank > 1:
+            val = "[" * rank + el + "]" * rank
+            print(f"   attr: {attr_name:24} {val}")
+        elif rank == 1 and attr.shape[0] > 1:
+            val = f"[{attr[0]},{el}]"
+            print(f"   attr: {attr_name:24} {val}")
+        else:
+            print(f"   attr: {attr_name:24} {attr}")
+
+
 def getFolder(domain):
     username = cfg["hs_username"]
     password = cfg["hs_password"]
     endpoint = cfg["hs_endpoint"]
-    bucket   = cfg["hs_bucket"]
+    bucket = cfg["hs_bucket"]
     pattern = cfg["pattern"]
     query = cfg["query"]
     if cfg["verbose"]:
@@ -275,7 +311,7 @@ def getFolder(domain):
         verbose = False
     batch_size = 100  # use smaller batchsize for interactively listing of large collections
     d = h5py.Folder(domain, endpoint=endpoint, username=username, verbose=verbose,
-                      password=password, bucket=bucket, pattern=pattern, query=query, batch_size=batch_size)
+                    password=password, bucket=bucket, pattern=pattern, query=query, batch_size=batch_size)
     return d
 
 
@@ -287,6 +323,16 @@ def getFile(domain):
     fh = h5py.File(domain, mode='r', endpoint=endpoint, username=username,
                    password=password, bucket=bucket, use_cache=True)
     return fh
+
+
+def isFile(domain):
+    username = cfg["hs_username"]
+    password = cfg["hs_password"]
+    endpoint = cfg["hs_endpoint"]
+    bucket = cfg["hs_bucket"]
+
+    return h5py.is_hdf5(domain, endpoint=endpoint, username=username,
+                        password=password, bucket=bucket)
 
 
 def visitDomains(domain, depth=1):
@@ -301,10 +347,17 @@ def visitDomains(domain, depth=1):
         d = getFolder(domain + '/')
         dir_class = "domain"
         display_name = domain
+        if cfg["names_only"]:
+            parts = display_name.split('/')
+            if len(parts) > depth:
+                parts = parts[-depth:]
+                parts = parts[1:]
+                display_name = "/".join(parts)
         num_bytes = ' '
         if d.is_folder:
             dir_class = "folder"
-            display_name += '/'
+            if not cfg["names_only"]:
+                display_name += '/'
         elif cfg["verbose"]:
             # get the number of allocated bytes
             f = getFile(domain)
@@ -319,17 +372,19 @@ def visitDomains(domain, depth=1):
         else:
             timestamp = datetime.fromtimestamp(int(d.modified))
 
-        print("{:35} {:15} {:8} {} {}".format(owner, format_size(num_bytes),
-                                              dir_class, timestamp,
-                                              display_name))
+        if not cfg["names_only"]:
+            msg = f"{owner:35} {format_size(num_bytes):15} {dir_class:8} "
+            msg += f"{timestamp} {display_name}"
+            print(msg)
         count += 1
         if cfg["showacls"]:
             dumpAcls(d)
         for name in d:
             item = d[name]
             owner = item["owner"]
-            full_path = domain + '/' + name
-
+            full_path = display_name + name
+            if item["class"] == "folder":
+                full_path += "/"
             num_bytes = " "
             if cfg["verbose"] and "total_size" in item:
                 num_bytes = item["total_size"]
@@ -337,16 +392,20 @@ def visitDomains(domain, depth=1):
                     cfg["total_size"] = 0
                 cfg["total_size"] += item["total_size"]
             else:
-                 num_bytes = " "
+                num_bytes = " "
             dir_class = item["class"]
             if item["lastModified"] is None:
                 timestamp = ""
             else:
                 timestamp = datetime.fromtimestamp(int(item["lastModified"]))
 
-            print("{:35} {:15} {:8} {} {}".format(owner, format_size(num_bytes),
-                                              dir_class, timestamp,
-                                              full_path))
+            if cfg["names_only"]:
+                # just print the name...
+                print(full_path)
+            else:
+                msg = f"{owner:35} {format_size(num_bytes):15} {dir_class:8} "
+                msg += f"{timestamp} {full_path}"
+                print(msg)
             if cfg["showacls"]:
                 if dir_class == "folder":
                     with getFolder(domain + '/' + name + '/') as f:
@@ -375,6 +434,23 @@ def visitDomains(domain, depth=1):
     return count
 
 
+def checkDomain(path):
+    """ Convenience method to specify a domain + h5path as a single string.
+        Walk up the path items, as soon as the parent is a domain or folder return it.
+        Supply the other part as h5path.  """
+
+    path_names = path.split("/")
+    h5path = ""
+    while path_names:
+        domain_path = "/".join(path_names)
+        if h5py.is_hdf5(domain_path):
+            return (h5path, domain_path)
+        last = path_names[-1]
+        path_names = path_names[:-1]
+        h5path = last + "/" + h5path
+
+    return None
+
 
 #
 # Usage
@@ -391,12 +467,12 @@ def usage():
     print("       domain: HSDS domain (absolute path with or without 'hdf5:// prefix)")
     print("       folder: HSDS folder (path as above ending in '/')")
     print("")
-    
+
     print("Options:")
     for name in option_names:
         help_msg = cfg.get_help_message(name)
         if help_msg:
-            print(f"    {help_msg}")  
+            print(f"    {help_msg}")
     print("")
     print(f"example: {cmd} -r -e http://hsdshdflab.hdfgroup.org /shared/tall.h5")
     print("")
@@ -414,10 +490,18 @@ def main():
     # additional options
     cfg.setitem("showacls", False, flags=["--showacls",], help="display domain ACLs")
     cfg.setitem("showattrs", False, flags=["--showattrs",], help="display domain attributes")
-    cfg.setitem("pattern", None, flags=["--pattern",], choices=["REGEX",], help="list domains that match the given regex")
-    cfg.setitem("query", None, flags=["--query",], choices=["QUERY",], help="list domains where the attributes of the root group match the given query string")
+    cfg.setitem("pattern", None, flags=["--pattern",], choices=["REGEX",],
+                help="list domains that match the given regex")
+    cfg.setitem("query", None, flags=["--query",], choices=["QUERY",],
+                help="list domains where the attributes of the root group match the given query string")
     cfg.setitem("recursive", False, flags=["-r", "--recursive"], help="recursively list sub-folders or sub-groups")
-    cfg.setitem("human_readable", False, flags=["-H", "--human-readable"], help="with -v, print human readable sizes (e.g. 123M)")
+    cfg.setitem("dataset_path", None, flags=["-d", "--dataset"], choices=["H5PATH",], help="display specified dataset")
+    cfg.setitem("group_path", None, flags=["-g", "--group"], choices=["H5PATH",], help="display specified group")
+    cfg.setitem("datatype_path", None, flags=["-t", "--datatype"], choices=["H5PATH",],
+                help="display specified datatype")
+    cfg.setitem("names_only", False, flags=["-n", "--names"], help="list just folder names or link titles")
+    cfg.setitem("human_readable", False, flags=["-H", "--human-readable"],
+                help="with -v, print human readable sizes (e.g. 123M)")
     cfg.setitem("help", False, flags=["-h", "--help"], help="this message")
 
     try:
@@ -442,12 +526,24 @@ def main():
         else:
             depth = 1
 
+        h5path = None
+
         if domain.endswith('/'):
             # given a folder path
             count = visitDomains(domain, depth=depth)
-            print(f"{count} items")
+            if not cfg["names_only"]:
+                print(f"{count} items")
 
         else:
+            res = checkDomain(domain)
+            if res is None:
+                # couldn't find a domain, call getFile anyway so we can
+                # report on exactly what went wrong
+                pass
+            else:
+                h5path = res[0]
+                domain = res[1]
+                logging.debug(f"using h5path: {h5path} domain: {domain}")
             try:
                 f = getFile(domain)
             except IOError as ioe:
@@ -474,7 +570,97 @@ def main():
                 count = visitDomains(domain, depth=depth)
                 print(f"{count} items")
                 continue
-            dump('/', grp)
+
+            if h5path:
+                if h5path not in f:
+                    print(f"h5path: {h5path} not found in domain: {domain}")
+                    continue
+
+                obj = f[h5path]
+                class_name = obj.__class__.__name__
+                if class_name in ("Table", "Dataset"):
+                    dump(h5path, obj)
+                    continue
+                elif class_name == "Datatype":
+                    dump(h5path, obj)
+                    continue
+                else:
+                    grp = obj
+                    # we'll just fall through to our normal processin
+
+            if cfg["group_path"]:
+                if h5path:
+                    print("group_path option can't be used when h5path is specified")
+                    continue
+                h5path = cfg["group_path"]
+                if h5path not in grp:
+                    print(f"group_path: {h5path} not found")
+                    continue
+                else:
+                    grp = grp[h5path]
+                    class_name = grp.__class__.__name__
+                    if class_name != "Group":
+                        if class_name in ("Table", "Dataset"):
+                            hint = " (use --dataset option to display)"
+                        elif class_name == "Datatype":
+                            hint = " (use --datatype option to display)"
+                        else:
+                            hint = ""
+                        print(f"group_path: {h5path} points to a {class_name}{hint}")
+                        continue
+            else:
+                h5path = "/"  # start at root
+
+            if cfg["dataset_path"]:
+                dataset_path = cfg["dataset_path"]
+                if dataset_path[0] == "/" and h5path != "/":
+                    print("--group_path can't be used with absolute --dataset_path")
+                    continue
+                if dataset_path[0] == "/":
+                    h5path = dataset_path  # replace h5path
+                else:
+                    if h5path[-1] != "/":
+                        h5path = h5path + "/"
+                    h5path = h5path + dataset_path
+                    print("using h5path:", h5path)
+                if h5path not in grp:
+                    print("dataset path: {h5path} not found")
+                    continue
+                obj = grp[h5path]
+                class_name = obj.__class__.__name__
+                if class_name not in ("Table", "Dataset"):
+                    print(f"was expecting a Dataset object but found: {class_name}")
+                    continue
+
+                dump(h5path, obj)
+                continue
+
+            if cfg["datatype_path"]:
+                datatype_path = cfg["datatype_path"]
+                if datatype_path[0] == "/" and h5path != "/":
+                    print("--group_path can't be used with absolute --datatype_path")
+                    continue
+                if datatype_path[0] == "/":
+                    h5path = datatype_path  # replace h5path
+                else:
+                    if h5path[-1] != "/":
+                        h5path = h5path + "/"
+                    h5path = h5path + datatype_path
+                    print("using h5path:", h5path)
+                if h5path not in grp:
+                    print("datatype path: {h5path} not found")
+                    continue
+                obj = grp[h5path]
+                class_name = obj.__class__.__name__
+                if class_name != "Datatype":
+                    print(f"was expecting a Datatype object but found: {class_name}")
+                    continue
+                dump(h5path, obj)
+                continue
+
+            if cfg["showattrs"]:
+                # dump attributes for root group
+                dumpAttrs(grp)
 
             if depth < 0:
                 # recursive
@@ -483,6 +669,10 @@ def main():
                 visititems('/', grp, visited)
             else:
                 for k in grp:
+                    if cfg["names_only"]:
+                        # just print the link name
+                        print(k)
+                        continue
                     item = grp.get(k, getlink=True)
                     if item.__class__.__name__ == "HardLink":
                         # follow hardlinks

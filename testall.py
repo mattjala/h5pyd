@@ -14,25 +14,32 @@
 import os
 import sys
 
+
 hl_tests = ('test_attribute',
+            'test_config',
             'test_committedtype',
             'test_complex_numbers',
+            'test_dataset',
             'test_dataset_compound',
             'test_dataset_create',
             'test_dataset_extend',
             'test_dataset_fancyselect',
-            'test_dataset_objref',
             'test_dataset_getitem',
+            'test_dataset_multi',
+            'test_dataset_objref',
             'test_dataset_pointselect',
             'test_dataset_scalar',
             'test_dataset_setitem',
+            'test_dataset_swmr',
+            'test_datatype',
             'test_dimscale',
             'test_file',
+            'test_folder',
             'test_group',
             'test_table',
             'test_visit',
-            'test_vlentype',
-            'test_folder')
+            'test_vlentype',)
+
 
 app_tests = ('test_hsinfo', 'test_tall_inspect', 'test_diamond_inspect',
              'test_shuffle_inspect')

@@ -23,8 +23,6 @@ else:
     import h5pyd as h5py
 
 
-@ut.skipIf(os.environ.get('H5_DRIVER', '') == 'h5serv',
-           'Does not work with h5serv due to an h5json exception')
 class TestComplexNumbers(TestCase):
     """ Test read/write of complex numbers """
 
@@ -45,9 +43,14 @@ class TestComplexNumbers(TestCase):
             val = dset[0]
 
         self.assertEqual(val.shape, ())
-        self.assertEqual(val.dtype.kind, 'c')
-        self.assertEqual(val.real, 1.0)
-        self.assertEqual(val.imag, 0.)
+        if config.get('use_h5py'):
+            self.assertEqual(val.dtype.kind, 'c')
+            self.assertEqual(val.real, 1.0)
+            self.assertEqual(val.imag, 0.)
+        else:
+            self.assertEqual(val.dtype.kind, 'V')
+            self.assertEqual(val['r'], 1.0)
+            self.assertEqual(val['i'], 0.)
 
     def test_complex_attr(self):
         """Read and wrtie complex numbers in attributes"""

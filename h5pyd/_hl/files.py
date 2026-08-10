@@ -12,14 +12,16 @@
 
 from __future__ import absolute_import
 
+import io
 import os
-import time
 import json
+import pathlib
+import time
 
 from .objectid import GroupID
 from .group import Group
 from .httpconn import HttpConn
-from .config import Config
+from .. import config
 
 VERBOSE_REFRESH_TIME = 1.0  # 1 second
 
@@ -37,6 +39,143 @@ def is_hdf5(domain, **kwargs):
     except IOError:
         pass  # ignore any non-200 error
     return found
+
+
+class H5Image(io.RawIOBase):
+    """ file-like-object class that treats bytes of an HSDS dataset as an HDF5 file image
+        Can be used as a subsitute for a file path in h5py.File(filepath).  E.g.:
+        f = h5py.File(H5Image("hdf5:/myhsds_domain"))   """
+
+    def __init__(self, domain_path, h5path="h5image", chunks_per_page=1, logger=None):
+        """ verify dataset can be accessed and set logger if supplied """
+        self._cursor = 0
+        if domain_path and domain_path.startswith("hdf5::/"):
+            self._domain_path = domain_path
+        else:
+            self._domain_path = "hdf5:/" + domain_path
+        f = File(domain_path)
+        if h5path not in f:
+            raise IOError(f"Expected '{h5path}' dataset")
+        dset = f[h5path]
+        if len(dset.shape) != 1:
+            raise IOError("Expected one-dimensional dataset")
+        self._dset = dset
+        num_chunks = -(dset.shape[0] // -dset.chunks[0])
+        if chunks_per_page < 1:
+            chunks_per_page = 1
+        elif chunks_per_page > num_chunks:
+            chunks_per_page = num_chunks  # use the entire file as one page
+        else:
+            pass  # accept requested values
+        num_pages = -(num_chunks // -chunks_per_page)
+        self._page_cache = [None,] * num_pages
+        self._chunks_per_page = chunks_per_page
+        self._logger = logger
+        if self._logger:
+            self._logger.info(f"domain {self._domain_path} opened")
+
+    def __repr__(self):
+        """ Just rturn the domain path"""
+        return f'<{self._domain_path}>'
+
+    def readable(self):
+        """ it is """
+        return True
+
+    def seekable(self):
+        """ seek is ok """
+        return True
+
+    @property
+    def size(self):
+        """ return size of HDF5 image in bytes """
+        return self._dset.shape[0]
+
+    @property
+    def page_size(self):
+        """ return page_size in element count"""
+        return self._dset.chunks[0] * self._chunks_per_page
+
+    def tell(self):
+        """ return the current cursor position """
+        return self._cursor
+
+    def seek(self, offset, whence=io.SEEK_SET):
+        """ set the seek pointer """
+        if whence == io.SEEK_SET:
+            if self._logger:
+                self._logger.debug(f"SEEK_SET({offset})")
+            self._cursor = offset
+        elif whence == io.SEEK_CUR:
+            if self._logger:
+                self._logger.debug(f"SEEK_CUR({offset})")
+            self._cursor += offset
+        elif whence == io.SEEK_END:
+            if self._logger:
+                self._logger.debug(f"SEEK_END({offset})")
+            self._cursor = self.size + offset
+        else:
+            raise ValueError(f'{whence}: Unknown whence value')
+        if self._logger:
+            self._logger.debug(f"cursor: {self._cursor}")
+        return self._cursor
+
+    def _get_page(self, page_number):
+        """ Return bytes for the given page.
+            Read a page from the HSDS dataset if not already in the cache """
+        if self._page_cache[page_number] is None:
+            if self._logger:
+                self._logger.info(f"reading page {page_number} from server")
+            offset = page_number * self.page_size
+            arr = self._dset[offset:offset + self.page_size]
+            self._page_cache[page_number] = arr.tobytes()
+        if self._logger:
+            self._logger.debug(f"fetching page {page_number} from cache")
+        return self._page_cache[page_number]
+
+    def read(self, size=-1):
+        """ Read size bytes from the cursor """
+        start = self._cursor
+        if size < 0 or self._cursor + size >= self.size:
+            stop = self.size
+            self.seek(offset=0, whence=io.SEEK_END)
+        else:
+            stop = start + size
+            self.seek(offset=size, whence=io.SEEK_CUR)
+
+        if self._logger:
+            self._logger.debug(f">>GET {start}:{stop}")
+
+        buffer = bytearray(stop - start)
+        offset = start
+        while offset < stop:
+            page_number = offset // self.page_size
+            page_bytes = self._get_page(page_number)
+            n = offset % self.page_size
+            if stop // self.page_size > page_number:
+                # just read to the end of the page
+                m = self.page_size
+            else:
+                # remaing bytes don't cross page boundry
+                m = n + (stop - offset)
+
+            num_bytes = m - n
+            buffer_start = offset - start
+            buffer_stop = buffer_start + num_bytes
+            buffer[buffer_start:buffer_stop] = page_bytes[n:m]
+
+            offset += num_bytes
+
+        if self._logger:
+            self._logger.debug(f"returning: {len(buffer)} bytes")
+        return buffer
+
+    def readinto(self, buff):
+        if self._logger:
+            self._logger.debug(f"readinto({len(buff)})")
+        data = self.read(len(buff))
+        buff[:len(data)] = data
+        return len(data)
 
 
 class File(Group):
@@ -78,9 +217,7 @@ class File(Group):
     @property
     def libver(self):
         """File format version bounds (2-tuple: low, high)"""
-        # bounds = self.id.get_access_plist().get_libver_bounds()
-        # return tuple(libver_dict_r[x] for x in bounds)
-        return ("0.0.1",)
+        return ("0.0.1", "0.0.1")
 
     @property
     def serverver(self):
@@ -105,6 +242,24 @@ class File(Group):
     def limits(self):
         return self._limits
 
+    @property
+    def swmr_mode(self):
+        """ Controls use of cached metadata """
+        return self._swmr_mode
+
+    @swmr_mode.setter
+    def swmr_mode(self, value):
+        # enforce the same rule as h5py - swrm_mode can't be changed after opening the file
+        mode = self.id.http_conn.mode
+        if mode == "r":
+            # read only mode
+            msg = "SWMR mode can't be changed after file open"
+            raise ValueError(msg)
+        if self._swmr_mode and not value:
+            msg = "SWMR mode can only be set to off by closing the file"
+            raise ValueError(msg)
+        self._swmr_mode = True
+
     def __init__(
         self,
         domain,
@@ -116,9 +271,12 @@ class File(Group):
         api_key=None,
         use_session=True,
         use_cache=True,
+        swmr=False,
+        libver=None,
         logger=None,
         owner=None,
         linked_domain=None,
+        track_order=None,
         retries=10,
         timeout=180,
         **kwds,
@@ -147,6 +305,12 @@ class File(Group):
         use_cache
             save attribute and links values rather than retreiving from server each time they are accessed.
             Set to False if the storage content is expected to change due to another application
+        swmr
+            For compatibility with h5py - has the effect of overriding use_cache so that metadata
+            will always be synchronized with the server
+        libver
+            For compatibility with h5py - library version bounds.  Has no effect other
+            than returning given value as property
         logger
             supply log handler to be used
         owner
@@ -154,23 +318,21 @@ class File(Group):
             by admin users
         linked_domain
             Create new domain using the root of the linked domain
+        track_order
+            Whether to track dataset/group/attribute creation order within this file. Objects will be iterated
+            in ascending creation order if this is True, if False in ascending alphanumeric order.
+            If None use global default get_config().track_order.
         retries
             Number of retry attempts to be used if a server request fails
         timeout
             Timeout value in seconds
         """
-
         groupid = None
         dn_ids = []
         # if we're passed a GroupId as domain, just initialize the file object
         # with that.  This will be faster and enable the File object to share the same http connection.
-        if (
-            mode is None
-            and endpoint is None
-            and username is None
-            and password is None
-            and isinstance(domain, GroupID)
-        ):
+        no_endpoint_info = endpoint is None and username is None and password is None
+        if (mode is None and no_endpoint_info and isinstance(domain, GroupID)):
             groupid = domain
         else:
             if mode and mode not in ("r", "r+", "w", "w-", "x", "a"):
@@ -179,7 +341,7 @@ class File(Group):
             if mode is None:
                 mode = "r"
 
-            cfg = Config()  # pulls in state from a .hscfg file (if found).
+            cfg = config.get_config()  # pulls in state from a .hscfg file (if found).
 
             # accept domain values in the form:
             #   http://server:port/home/user/myfile.h5
@@ -191,10 +353,10 @@ class File(Group):
             #   /home/user/myfile.h5
             #
             #  For http prefixed values, extract the endpont and use the rest as domain path
-            for protocol in ("http://", "https://", "hdf5://"):
-                if domain.startswith(protocol):
+            for protocol in ("http://", "https://", "hdf5://", "http+unix://"):
+                if domain and domain.startswith(protocol):
                     if protocol.startswith("http"):
-                        domain = domain[len(protocol) :]
+                        domain = domain[len(protocol):]
                         # extract the endpoint
                         n = domain.find("/")
                         if n < 0:
@@ -203,30 +365,33 @@ class File(Group):
                         domain = domain[n:]
                         break
                     else:  # hdf5://
-                        domain = domain[(len(protocol) - 1) :]
+                        domain = domain[(len(protocol) - 1):]
 
             if not domain:
                 raise IOError(400, "no domain provided")
+
+            domain_path = pathlib.PurePath(domain)
+            if isinstance(domain_path, pathlib.PureWindowsPath):
+                # Standardize path root to POSIX-style path
+                domain = '/' + '/'.join(domain_path.parts[1:])
 
             if domain[0] != "/":
                 raise IOError(400, "relative paths are not valid")
 
             if endpoint is None:
-                if "H5SERV_ENDPOINT" in os.environ:
-                    endpoint = os.environ["H5SERV_ENDPOINT"]
-                elif "hs_endpoint" in cfg:
+                if "hs_endpoint" in cfg:
                     endpoint = cfg["hs_endpoint"]
 
+            # remove the trailing slash on endpoint if it exists
+            if endpoint and endpoint.endswith('/'):
+                endpoint = endpoint.strip('/')
+
             if username is None:
-                if "H5SERV_USERNAME" in os.environ:
-                    username = os.environ["H5SERV_USERNAME"]
-                elif "hs_username" in cfg:
+                if "hs_username" in cfg:
                     username = cfg["hs_username"]
 
             if password is None:
-                if "H5SERV_PASSWORD" in os.environ:
-                    password = os.environ["H5SERV_PASSWORD"]
-                elif "hs_password" in cfg:
+                if "hs_password" in cfg:
                     password = cfg["hs_password"]
 
             if api_key is None and "hs_api_key" in cfg:
@@ -237,6 +402,9 @@ class File(Group):
                     bucket = os.environ["HS_BUCKET"]
                 elif "hs_bucket" in cfg:
                     bucket = cfg["hs_bucket"]
+
+            if swmr:
+                use_cache = False  # disable metadata caching in swmr mode
 
             http_conn = HttpConn(
                 domain,
@@ -268,7 +436,7 @@ class File(Group):
             # need some special logic for the first request in local mode
             # to give the sockets time to initialize
 
-            if endpoint.startswith("local"):
+            if endpoint and endpoint.startswith("local"):
                 connect_backoff = [0.5, 1, 2, 4, 8, 16]
             else:
                 connect_backoff = []
@@ -317,6 +485,10 @@ class File(Group):
                     body["owner"] = owner
                 if linked_domain:
                     body["linked_domain"] = linked_domain
+                if track_order or cfg.track_order:
+                    create_props = {"CreateOrder": 1}
+                    group_body = {"creationProperties": create_props}
+                    body["group"] = group_body
                 rsp = http_conn.PUT(req, params=params, body=body)
                 if rsp.status_code != 201:
                     http_conn.close()
@@ -382,26 +554,25 @@ class File(Group):
 
             groupid = GroupID(None, group_json, http_conn=http_conn)
         # end else
+
         self._name = "/"
         self._id = groupid
-        self._verboseInfo = None  # aditional state we'll get when requested
+        self._verboseInfo = None  # additional state we'll get when requested
         self._verboseUpdated = None  # when the verbose data was fetched
         self._lastScan = None  # when summary stats where last updated by server
         self._dn_ids = dn_ids
+        self._swmr_mode = swmr
 
-        Group.__init__(self, self._id)
+        Group.__init__(self, self._id, track_order=track_order)
 
     def _getVerboseInfo(self):
         now = time.time()
-        if (
-            self._verboseUpdated is None
-            or now - self._verboseUpdated > VERBOSE_REFRESH_TIME
-        ):
+        if (self._verboseUpdated is None or now - self._verboseUpdated > VERBOSE_REFRESH_TIME):
             # resynch the verbose data
             req = "/?verbose=1"
-            rsp_json = self.GET(req, use_cache=False)
+            rsp_json = self.GET(req, use_cache=False, params={"CreateOrder": "1" if self._track_order else "0"})
 
-            self.log.debug("get verbose info: {}".format(rsp_json))
+            self.log.debug("get verbose info")
             props = {}
             for k in (
                 "num_objects",
@@ -598,29 +769,27 @@ class File(Group):
     def flush(self):
         """Tells the service to complete any pending updates to permanent storage"""
         self.log.debug("flush")
-        if self._id.id.startswith("g-"):
-            # Currently flush only works with HSDS
-            self.log.info("sending PUT flush request")
-            req = "/"
-            body = {"flush": 1, "getdnids": 1}
-            rsp = self.PUT(req, body=body)
-            if "dn_ids" in rsp:
-                dn_ids = rsp["dn_ids"]
-                orig_ids = set(self._dn_ids)
-                current_ids = set(dn_ids)
-                self._dn_ids = current_ids
-                if orig_ids and orig_ids != current_ids:
-                    self.log.debug("original dn_ids: {}".format(orig_ids))
-                    self.log.debug("current dn_ids: {}".format(current_ids))
-                    self.log.warn("HSDS nodes have changed")
-                    raise IOError(500, "Unexpected Error")
-            self.log.info("PUT flush complete")
+        self.log.info("sending PUT flush request")
+        req = "/"
+        body = {"flush": 1, "getdnids": 1}
+        rsp = self.PUT(req, body=body)
+        if "dn_ids" in rsp:
+            dn_ids = rsp["dn_ids"]
+            orig_ids = set(self._dn_ids)
+            current_ids = set(dn_ids)
+            self._dn_ids = current_ids
+            if orig_ids and orig_ids != current_ids:
+                self.log.debug(f"original dn_ids: {orig_ids}")
+                self.log.debug(f"current dn_ids: {current_ids}")
+                self.log.warning("HSDS nodes have changed")
+                raise IOError(500, "Unexpected Error")
+        self.log.info("PUT flush complete")
 
     def close(self, flush=None):
         """Clears reference to remote resource."""
         # this will close the socket of the http_conn singleton
 
-        self.log.debug("close, mode: {}".format(self.mode))
+        self.log.debug(f"close, mode: {self.mode}")
         if flush is None:
             # set flush to true if this is a direct connect and file
             # is writable

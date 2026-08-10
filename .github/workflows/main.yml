@@ -1,0 +1,127 @@
+name: h5pyd CI
+
+on:
+  push:
+  pull_request:
+    branches: [master]
+
+env:
+  ADMIN_PASSWORD: admin
+  ADMIN_USERNAME: admin
+  USER_NAME: test_user1
+  USER_PASSWORD: test
+  USER2_NAME: test_user2
+  USER2_PASSWORD: test
+  HSDS_USERNAME: test_user1
+  HSDS_PASSWORD: test
+  HSDS_ENDPOINT: http://127.0.0.1:5101
+  ROOT_DIR: ${{github.workspace}}/hsds/hsds_root
+  BUCKET_NAME: hsds_bucket
+  HS_ENDPOINT: http://127.0.0.1:5101
+  H5PYD_TEST_FOLDER: /home/test_user1/h5pyd_tests/
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12"]
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install flake8 pytest
+
+      - name: Lint with flake8
+        shell: bash
+        run: |
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics # stop the build if there are Python syntax errors or undefined names
+          flake8 . --count --max-complexity=10 --max-line-length=127 --statistics # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
+
+      - name: Checkout HSDS 
+        uses: actions/checkout@v4
+        with:
+          repository: HDFGroup/hsds
+          path: ${{github.workspace}}/hsds
+
+      - name: Install HSDS
+        working-directory: ${{github.workspace}}/hsds
+        shell: bash
+        run: |
+          pip install -e .
+
+      - name: Start HSDS
+        shell: bash
+        working-directory: ${{github.workspace}}/hsds
+        run: |
+          mkdir hsds_root
+          mkdir hsds_root/hsds_bucket
+          cp admin/config/groups.default admin/config/groups.txt
+          cp admin/config/passwd.default admin/config/passwd.txt
+          hsds --root_dir hsds_root --host localhost --port 5101 --password_file admin/config/passwd.txt --logfile hs.log --loglevel DEBUG --config_dir=admin/config --count=4 &
+
+      - name: Wait for node startup
+        shell: bash
+        run: |
+          sleep 30
+      
+      - name: HSDS Setup
+        shell: bash
+        env:
+          ADMIN_PASSWORD: admin
+          ADMIN_USERNAME: admin
+        working-directory: ${{github.workspace}}/hsds
+        run: |
+          python tests/integ/setup_test.py
+
+      - name: Install h5pyd package
+        shell: bash
+        run: |
+          pip install -e .
+
+      - name: Create h5pyd test folder
+        env:
+          HS_USERNAME: test_user1
+          HS_PASSWORD: test
+          TEST2_USERNAME: test_user2
+          TEST2_PASSWORD: test
+        run: |
+          hstouch -v /home/test_user1/h5pyd_tests/
+
+      - name: Run h5pyd tests
+        id: h5pyd-tests
+        env:
+          HS_USERNAME: test_user1
+          HS_PASSWORD: test
+          TEST2_USERNAME: test_user2
+          TEST2_PASSWORD: test
+        run: |
+          python testall.py
+      
+      - name: Show HSDS Logs on Fail
+        working-directory: ${{github.workspace}}/hsds
+        # Only run if the whole workflow failed due to h5pyd tests
+        if: ${{failure() && steps.h5pyd-tests.outcome == 'failure'}}
+        run: |
+          cat hs.log
+  
+      - name: Run h5pyd tests with h5py
+        env:
+          HS_USERNAME: test_user1
+          HS_PASSWORD: test
+          TEST2_USERNAME: test_user2
+          TEST2_PASSWORD: test
+          USE_H5PY: 1
+        run: |
+          python testall.py

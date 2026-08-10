@@ -14,6 +14,7 @@ from __future__ import absolute_import
 
 import posixpath
 import os
+import sys
 import json
 import numpy as np
 import logging
@@ -27,6 +28,11 @@ from .h5type import Reference, check_dtype, special_dtype
 numpy_integer_types = (np.int8, np.uint8, np.int16, np.int16, np.int32, np.uint32, np.int64, np.uint64)
 numpy_float_types = (np.float16, np.float32, np.float64)
 
+
+def eprint(*args, **kwargs):
+    print(*args, file=sys.stderr, **kwargs)
+
+
 class FakeLock():
     def __init__(self):
         pass
@@ -36,6 +42,7 @@ class FakeLock():
 
     def __exit__(self, a, b, c):
         pass
+
 
 _phil = FakeLock()
 
@@ -58,6 +65,7 @@ def with_phil(func):
     functools.update_wrapper(wrapper, func, ('__name__', '__doc__'))
     return wrapper
 
+
 def find_item_type(data):
     """Find the item type of a simple object or collection of objects.
 
@@ -73,8 +81,7 @@ def find_item_type(data):
     """
     if isinstance(data, np.ndarray):
         if (
-            data.dtype.kind == 'O'
-            and not check_dtype(vlen=data.dtype)
+            data.dtype.kind == 'O' and not check_dtype(vlen=data.dtype)
         ):
             item_types = {type(e) for e in data.flat}
         else:
@@ -104,12 +111,14 @@ def guess_dtype(data):
 
     return None
 
+
 def is_float16_dtype(dt):
     if dt is None:
         return False
 
     dt = np.dtype(dt)  # normalize strings -> np.dtype objects
     return dt.kind == 'f' and dt.itemsize == 2
+
 
 def array_for_new_object(data, specified_dtype=None):
     """Prepare an array from data used to create a new dataset or attribute"""
@@ -139,56 +148,58 @@ def array_for_new_object(data, specified_dtype=None):
 
 
 def _decode(item, encoding="ascii"):
-        """decode any byte items to python 3 strings
-        """
-        ret_val = None
-        if type(item) is bytes:
-            ret_val = item.decode(encoding)
-        elif type(item) is list:
-            ret_val = []
-            for x in item:
-                ret_val.append(_decode(x, encoding))
-        elif type(item) is tuple:
-            ret_val = []
-            for x in item:
-                ret_val.append(_decode(x, encoding))
-            ret_val = tuple(ret_val)
-        elif type(item) is dict:
-            ret_val = {}
-            for k in dict:
-                ret_val[k] = _decode(item[k], encoding)
-        elif type(item) is np.ndarray:
-            x = item.tolist()
-            ret_val = []
-            for x in item:
-                ret_val.append(_decode(x, encoding))
-        elif type(item) in numpy_integer_types:
-            ret_val = int(item)
-        elif type(item) in numpy_float_types:
-            ret_val = float(item)
-        else:
-            ret_val = item
-        return ret_val
+    """
+    decode any byte items to python 3 strings
+    """
+    ret_val = None
+    if type(item) is bytes:
+        ret_val = item.decode(encoding)
+    elif type(item) is list:
+        ret_val = []
+        for x in item:
+            ret_val.append(_decode(x, encoding))
+    elif type(item) is tuple:
+        ret_val = []
+        for x in item:
+            ret_val.append(_decode(x, encoding))
+        ret_val = tuple(ret_val)
+    elif type(item) is dict:
+        ret_val = {}
+        for k in dict:
+            ret_val[k] = _decode(item[k], encoding)
+    elif type(item) is np.ndarray:
+        x = item.tolist()
+        ret_val = []
+        for x in item:
+            ret_val.append(_decode(x, encoding))
+    elif type(item) in numpy_integer_types:
+        ret_val = int(item)
+    elif type(item) in numpy_float_types:
+        ret_val = float(item)
+    else:
+        ret_val = item
+    return ret_val
 
 
-"""
-Convert a list to a tuple, recursively.
-Example. [[1,2],[3,4]] -> ((1,2),(3,4))
-"""
 # TBD: this was cut & pasted from attrs.py
 def toTuple(rank, data):
+    """
+    Convert a list to a tuple, recursively.
+    Example. [[1,2],[3,4]] -> ((1,2),(3,4))
+    """
     if type(data) in (list, tuple):
         if rank > 0:
-            return list(toTuple(rank-1, x) for x in data)
+            return list(toTuple(rank - 1, x) for x in data)
         else:
-            return tuple(toTuple(rank-1, x) for x in data)
+            return tuple(toTuple(rank - 1, x) for x in data)
     else:
         return data
 
-"""
-Helper - get num elements defined by a shape
-"""
+
 def getNumElements(dims):
+    """
+    Helper - get num elements defined by a shape
+    """
     num_elements = 0
     if isinstance(dims, int):
         num_elements = dims
@@ -200,22 +211,23 @@ def getNumElements(dims):
         raise ValueError("Unexpected argument")
     return num_elements
 
-"""
-Copy JSON array into given numpy array
-"""
-def copyToArray(arr, rank, index, data, vlen_base=None):
 
+def copyToArray(arr, rank, index, data, vlen_base=None):
+    """
+    Copy JSON array into given numpy array
+    """
     nlen = arr.shape[rank]
     if len(data) != nlen:
-        raise ValueError("Array len of {} at index: {} doesn't match data length: {}".format(nlen, index, len(data)))
+        msg = f"Array len of {nlen} at index: {index} doesn't match data length: {len(data)}"
+        raise ValueError(msg)
     for i in range(nlen):
         index[rank] = i
         if rank < len(arr.shape) - 1:
             # recursive call
-            copyToArray(arr, rank+1, index, data[i], vlen_base=vlen_base)
+            copyToArray(arr, rank + 1, index, data[i], vlen_base=vlen_base)
         else:
             if vlen_base:
-                if vlen_base == str:
+                if vlen_base in (str, bytes):
                     e = str(data[i])
                 else:
                     e = np.array(data[i], dtype=vlen_base)
@@ -236,10 +248,12 @@ def jsonToArray(data_shape, data_dtype, data_json):
     # gives us a list instead.
 
     # Special case: complex numbers
-    if (data_dtype.names is not None and
-            data_dtype.names == ('r', 'i') and
-            all(dt.kind == 'f' for dt, off in data_dtype.fields.values()) and
-            data_dtype.fields['r'][0] == data_dtype.fields['i'][0]):
+    is_complex = data_dtype.names is not None and (
+        data_dtype.names == ('r', 'i')) and (
+        all(dt.kind == 'f' for dt, off in data_dtype.fields.values())) and (
+        data_dtype.fields['r'][0] == data_dtype.fields['i'][0])
+
+    if (is_complex):
         itemsize = data_dtype.itemsize
         if itemsize == 16:
             cmplx_dtype = np.dtype(np.complex128)
@@ -284,24 +298,24 @@ def jsonToArray(data_shape, data_dtype, data_json):
                 converted_data = toTuple(np_shape_rank, data_json)
             data_json = converted_data
 
-
         arr = np.array(data_json, dtype=data_dtype)
         # raise an exception of the array shape doesn't match the selection shape
         # allow if the array is a scalar and the selection shape is one element,
         # numpy is ok with this
         if arr.size != npoints:
             msg = "Input data doesn't match selection number of elements"
-            msg += " Expected {}, but received: {}".format(npoints, arr.size)
+            msg += f" Expected {npoints}, but received: {arr.size}"
             raise ValueError(msg)
         if arr.shape != data_shape:
             arr = arr.reshape(data_shape)  # reshape to match selection
 
     return arr
 
-"""
-Return True if the type contains variable length elements
-"""
+
 def isVlen(dt):
+    """
+    Return True if the type contains variable length elements
+    """
     is_vlen = False
     if len(dt) > 1:
         names = dt.names
@@ -314,11 +328,12 @@ def isVlen(dt):
             is_vlen = True
     return is_vlen
 
-"""
-Get number of byte needed for given element as a bytestream
-"""
+
 def getElementSize(e, dt):
-    # print(f"getElementSize - e: {e}  dt: {dt} itemsize: {dt.itemsize}")
+    """
+    Get number of byte needed for given element as a bytestream
+    """
+
     if len(dt) > 1:
         count = 0
         for name in dt.names:
@@ -330,12 +345,8 @@ def getElementSize(e, dt):
     else:
         # variable length element
         vlen = dt.metadata["vlen"]
-        if isinstance(e, int):
-            if e == 0:
-                count = 4  # non-initialized element
-            else:
-                raise ValueError(f"Unexpected value: {e}")
-        elif isinstance(e, bytes):
+
+        if isinstance(e, bytes):
             count = len(e) + 4
         elif isinstance(e, str):
             count = len(e.encode('utf-8')) + 4
@@ -344,7 +355,7 @@ def getElementSize(e, dt):
             if e.dtype.kind != 'O':
                 count = e.dtype.itemsize * nElements
             else:
-                count = nElements * vlen.itemsize # tbd - special case for strings?
+                count = nElements * vlen.itemsize
             count += 4  # byte count
         elif isinstance(e, list) or isinstance(e, tuple):
             if not e:
@@ -353,17 +364,21 @@ def getElementSize(e, dt):
             else:
                 count = len(e) * vlen.itemsize + 4  # +4 for byte count
         else:
+            # uninitialized element
+            if e and not np.isnan(e):
+                raise ValueError(f"Unexpected value: {e}")
+            else:
+                count = 4  # non-initialized element
 
-            raise TypeError(f"unexpected type: {type(e)}")
     return count
 
 
-"""
-Get number of bytes needed to store given numpy array as a bytestream
-"""
 def getByteArraySize(arr):
+    """
+    Get number of bytes needed to store given numpy array as a bytestream
+    """
     if not isVlen(arr.dtype) and arr.dtype.kind != 'O':
-        print("not isVlen")
+        # not vlen just return itemsize * number of elements
         return arr.itemsize * np.prod(arr.shape)
     nElements = int(np.prod(arr.shape))
     # reshape to 1d for easier iteration
@@ -372,21 +387,24 @@ def getByteArraySize(arr):
     count = 0
     for e in arr1d:
         count += getElementSize(e, dt)
+
     return count
 
-"""
-Copy to buffer at given offset
-"""
+
 def copyBuffer(src, des, offset):
+    """
+    Copy to buffer at given offset
+    """
     for i in range(len(src)):
-        des[i+offset] = src[i]
+        des[i + offset] = src[i]
 
     return offset + len(src)
 
-"""
-Copy element to bytearray
-"""
+
 def copyElement(e, dt, buffer, offset, vlen=None):
+    """
+    Copy element to bytearray
+    """
     if vlen is None and dt.metadata and "vlen" in dt.metadata:
         vlen = dt.metadata["vlen"]
     if len(dt) > 1:
@@ -395,11 +413,10 @@ def copyElement(e, dt, buffer, offset, vlen=None):
             field_val = e[name]
             offset = copyElement(field_val, field_dt, buffer, offset)
     elif not vlen:
-        #print("e no vlen: {} type: {}".format(e, type(e)))
+        # print("e no vlen: {} type: {}".format(e, type(e)))
         e_buf = e.tobytes()
         if len(e_buf) < dt.itemsize:
             # extend the buffer for fixed size strings
-            #print("extending buffer to {}".format(dt.itemsize))
             e_buf_ex = bytearray(dt.itemsize)
             for i in range(len(e_buf)):
                 e_buf_ex[i] = e_buf[i]
@@ -407,13 +424,7 @@ def copyElement(e, dt, buffer, offset, vlen=None):
         offset = copyBuffer(e_buf, buffer, offset)
     else:
         # variable length element
-        if isinstance(e, int):
-            if e == 0:
-                # write 4-byte integer 0 to buffer
-                offset = copyBuffer(b'\x00\x00\x00\x00', buffer, offset)
-            else:
-                raise ValueError("Unexpected value: {}".format(e))
-        elif isinstance(e, bytes):
+        if isinstance(e, bytes):
             count = np.int32(len(e))
             offset = copyBuffer(count.tobytes(), buffer, offset)
             offset = copyBuffer(e, buffer, offset)
@@ -440,9 +451,6 @@ def copyElement(e, dt, buffer, offset, vlen=None):
                 arr = np.asarray(arr1d, dtype=vlen)
                 offset = copyBuffer(arr.tobytes(), buffer, offset)
 
-                #for item in arr1d:
-                #    offset = copyElement(item, dt, buffer, offset)
-
         elif isinstance(e, list) or isinstance(e, tuple):
             count = np.int32(len(e) * vlen.itemsize)
             offset = copyBuffer(count.tobytes(), buffer, offset)
@@ -453,34 +461,41 @@ def copyElement(e, dt, buffer, offset, vlen=None):
             offset = copyBuffer(arr.tobytes(), buffer, offset)
 
         else:
-            raise TypeError("unexpected type: {}".format(type(e)))
-        #print("buffer: {}".format(buffer))
+            # uninitialized variable length element
+            if e and not np.isnan(e):
+                raise ValueError(f"Unexpected value: {e}")
+            else:
+                # write 4-byte integer 0 to buffer
+                offset = copyBuffer(b'\x00\x00\x00\x00', buffer, offset)
+        # print("buffer: {}".format(buffer))
     return offset
 
-"""
-Get the count value from persisted vlen array
-"""
+
 def getElementCount(buffer, offset):
-    count_bytes = bytes(buffer[offset:(offset+4)])
+    """
+    Get the count value from persisted vlen array
+    """
+    count_bytes = bytes(buffer[offset:(offset + 4)])
 
     try:
-        count = int(np.frombuffer(count_bytes, dtype="<i4"))
+        arr = np.frombuffer(count_bytes, dtype="<i4")
+        count = int(arr[0])
     except TypeError as e:
-        msg = "Unexpected error reading count value for variable length elemennt: {}".format(e)
+        msg = f"Unexpected error reading count value for variable length elemennt: {e}"
         raise TypeError(msg)
     if count < 0:
         # shouldn't be negative
         raise ValueError("Unexpected count value for variable length element")
-    if count > 1024*1024*1024:
+    if count > 1024 * 1024 * 1024:
         # expect variable length element to be between 0 and 1mb
         raise ValueError("Variable length element size expected to be less than 1MB")
     return count
 
 
-"""
-Read element from bytearrray
-"""
 def readElement(buffer, offset, arr, index, dt):
+    """
+    Read element from bytearrray
+    """
     # print(f"readElement, offset: {offset}, index: {index} dt: {dt}")
 
     if len(dt) > 1:
@@ -490,13 +505,13 @@ def readElement(buffer, offset, arr, index, dt):
             offset = readElement(buffer, offset, e, name, field_dt)
     elif not dt.metadata or "vlen" not in dt.metadata:
         count = dt.itemsize
-        e_buffer = buffer[offset:(offset+count)]
+        e_buffer = buffer[offset:(offset + count)]
         offset += count
         try:
             e = np.frombuffer(bytes(e_buffer), dtype=dt)
             arr[index] = e[0]
         except ValueError:
-            print(f"ERROR: ValueError setting {e_buffer} and dtype: {dt}")
+            eprint(f"ERROR: ValueError setting {e_buffer} and dtype: {dt}")
             raise
     else:
         # variable length element
@@ -514,7 +529,7 @@ def readElement(buffer, offset, arr, index, dt):
             offset += 4
             if count < 0:
                 raise ValueError("Unexpected variable length data format")
-            e_buffer = buffer[offset:(offset+count)]
+            e_buffer = buffer[offset:(offset + count)]
             offset += count
 
             if vlen in (bytes, str):
@@ -523,36 +538,38 @@ def readElement(buffer, offset, arr, index, dt):
                 try:
                     e = np.frombuffer(bytes(e_buffer), dtype=vlen)
                 except ValueError:
-                    print("ValueError -- e_buffer:", e_buffer, "dtype:", vlen)
+                    eprint("ValueError -- e_buffer:", e_buffer, "dtype:", vlen)
                     raise
-                arr[index] = e        
+                arr[index] = e
 
     return offset
 
 
-"""
-Return byte representation of numpy array
-"""
 def arrayToBytes(arr, vlen=None):
+    """
+    Return byte representation of numpy array
+    """
     if not isVlen(arr.dtype) and vlen is None:
         # can just return normal numpy bytestream
         return arr.tobytes()
 
-    nSize = getByteArraySize(arr)
-    buffer = bytearray(nSize)
-    offset = 0
     nElements = int(np.prod(arr.shape))
     arr1d = arr.reshape((nElements,))
+    nSize = getByteArraySize(arr1d)
+    buffer = bytearray(nSize)
+    offset = 0
+
     for e in arr1d:
         offset = copyElement(e, arr1d.dtype, buffer, offset, vlen=vlen)
     return buffer
 
-"""
-Create numpy array based on byte representation
-"""
+
 def bytesToArray(data, dt, shape):
+    """
+    Create numpy array based on byte representation
+    """
     nelements = getNumElements(shape)
-    
+
     if not isVlen(dt):
         # regular numpy from string
         arr = np.frombuffer(data, dtype=dt)
@@ -561,7 +578,7 @@ def bytesToArray(data, dt, shape):
         offset = 0
         for index in range(nelements):
             offset = readElement(data, offset, arr, index, dt)
-    
+
     if shape is not None:
         if shape == () and dt.shape:
             # special case for scalar array with array sub-type
@@ -569,7 +586,6 @@ def bytesToArray(data, dt, shape):
         else:
             arr = arr.reshape(shape)
     return arr
-
 
 
 class LinkCreationPropertyList(object):
@@ -594,7 +610,6 @@ class LinkCreationPropertyList(object):
         return self._char_encoding
 
 
-
 class LinkAccessPropertyList(object):
     """
         Represents a LinkAccessPropertyList
@@ -604,19 +619,21 @@ class LinkAccessPropertyList(object):
     def __repr__(self):
         return "<HDF5 LinkAccessPropertyList>"
 
+
 def default_lcpl():
     """ Default link creation property list """
     lcpl = LinkCreationPropertyList()
     return lcpl
+
 
 def default_lapl():
     """ Default link access property list """
     lapl = LinkAccessPropertyList()
     return lapl
 
+
 dlapl = default_lapl()
 dlcpl = default_lcpl()
-
 
 
 class CommonStateObject(object):
@@ -628,7 +645,6 @@ class CommonStateObject(object):
 
         Also implements Unicode operations.
     """
-
 
     @property
     def _lapl(self):
@@ -673,8 +689,6 @@ class CommonStateObject(object):
         if lcpl:
             return name, get_lcpl(coding)
         return name
-
-
 
     def _d(self, name):
         """ Decode a name according to the current file settings.
@@ -721,10 +735,8 @@ class _RegionProxy(object):
         pass
         # bases classes will override
 
-
     def shape(self, ref):
         pass
-
 
     def selection(self, ref):
         """ Get the shape of the target dataspace selection referred to by *ref*
@@ -754,7 +766,6 @@ class ACL(object):
     def update(self):
         return self._update
 
-
     @property
     def readACL(self):
         return self._readACL
@@ -762,8 +773,6 @@ class ACL(object):
     @property
     def updateACL(self):
         return self._updateACL
-
-
 
     """
         Proxy object which handles ACLs (access control list)
@@ -808,7 +817,7 @@ class HLObject(CommonStateObject):
 
         root_uuid = self._id.http_conn.root_uuid
         objid = self._id.uuid
-        self.log.debug("_getNameFromObjDb: find name for: {}".format(objid))
+        self.log.debug(f"_getNameFromObjDb: find name for: {objid}")
         objids = set()
         objids.add(objid)
         h5path = ""
@@ -816,9 +825,9 @@ class HLObject(CommonStateObject):
             found_link = False
             for id in objdb:
                 if id == objid:
-                    self.log.debug("_getNameFromObjDb - skipping id {} - obj cannot link to itself".format(id))
+                    self.log.debug(f"_getNameFromObjDb - skipping id {id} - obj cannot link to itself")
                     continue
-                self.log.debug("_getNameFromObjDb - searching id: {}".format(id))
+                self.log.debug(f"_getNameFromObjDb - searching id: {id}")
                 if not id.startswith("g-"):
                     continue  # not a group, so no links
                 if id in objids:
@@ -826,10 +835,11 @@ class HLObject(CommonStateObject):
                 obj = objdb[id]
                 links = obj["links"]
                 for title in links:
-                    self.log.debug("_getNameFromObjDb - looking at linK: {}".format(title))
+                    self.log.debug(f"_getNameFromObjDb - looking at linK: {title}")
                     link = links[title]
-                    if link["class"] != 'H5L_TYPE_HARD':
-                        self.log.debug("_getNameFromObjDb - skipping link type: {}".format(link['class']))
+                    link_class = link["class"]
+                    if link_class != 'H5L_TYPE_HARD':
+                        self.log.debug(f"_getNameFromObjDb - skipping link type: {link_class}")
                         continue
                     if link["id"] == objid:
                         # found a link to our target
@@ -838,26 +848,25 @@ class HLObject(CommonStateObject):
                             h5path = title
                         else:
                             h5path = title + '/' + h5path
-                        self.log.debug("_getNameFromObjDb - update h5path: {}".format(h5path))
+                        self.log.debug(f"_getNameFromObjDb - update h5path: {h5path}")
                         objids.add(id)
                         if id == root_uuid:
                             h5path = '/' + h5path  # we got to root
                             self.log.debug("_getNameFromObjDb - found root")
                         else:
                             objid = id
-                            self.log.debug("_getNameFromObjDb - now looking for link to: {}".format(objid))
+                            self.log.debug(f"_getNameFromObjDb - now looking for link to: {objid}")
                         break
             if not found_link:
                 self.log.info("_getNameFromObjDb - could not find link")
                 break
         if h5path.startswith("/"):
             # found path to obj
-            self.log.debug("_getNameFromObjDb - returning: {}".format(h5path))
+            self.log.debug(f"_getNameFromObjDb - returning: {h5path}")
             return h5path
         else:
             self.log.debug("_getNameFromObjDb - could not find path")
             return None
-
 
     @property
     def name(self):
@@ -866,12 +875,12 @@ class HLObject(CommonStateObject):
             obj_name = self._name
         except AttributeError:
             # name hasn't been assigned yet
-            obj_name = self._getNameFromObjDb() # pull from the objdb if present
+            obj_name = self._getNameFromObjDb()  # pull from the objdb if present
             if obj_name:
                 self._name = obj_name  # save this
             if not obj_name:
                 # query the server for the name
-                self.log.debug("querying server for name to: {}".format(self._id.id))
+                self.log.debug(f"querying server for name to: {self._id.id}")
                 req = None
                 if self._id.id.startswith("g-"):
                     req = "/groups/" + self._id.id
@@ -880,15 +889,14 @@ class HLObject(CommonStateObject):
                 elif self._id.id.startswith("t-"):
                     req = "/datatypes/" + self._id
                 if req:
-                    params=params = {"getalias": 1}
-                    self.log.info("sending get alias request for id: {}".format(self._id.id))
+                    params = params = {"getalias": 1}
+                    self.log.info(f"sending get alias request for id: {self._id.id}")
                     obj_json = self.GET(req, params, use_cache=False)
                     if "alias" in obj_json:
                         alias = obj_json["alias"]
                         if len(alias) > 0:
                             obj_name = alias[0]
                             self._name = obj_name
-
 
         return obj_name
         # return self._d(h5i.get_name(self.id))
@@ -940,6 +948,10 @@ class HLObject(CommonStateObject):
         """Last modified time as a datetime object"""
         return self.id._modified
 
+    @property
+    def track_order(self):
+        return self._track_order
+
     def verifyCert(self):
         # default to validate CERT for https requests, unless
         # the H5PYD_VERIFY_CERT environment variable is set and True
@@ -957,7 +969,7 @@ class HLObject(CommonStateObject):
             raise IOError("object not initialized")
         # This should be the default - but explictly set anyway
         headers = {"Accept-Encoding": "deflate, gzip"}
-        
+
         rsp = self.id._http_conn.GET(req, params=params, headers=headers, format=format, use_cache=use_cache)
         if rsp.status_code != 200:
             self.log.info(f"Got response: {rsp.status_code}")
@@ -965,15 +977,15 @@ class HLObject(CommonStateObject):
         if 'Content-Type' in rsp.headers and rsp.headers['Content-Type'] == "application/octet-stream":
             if 'Content-Length' in rsp.headers:
                 # not available when http compression is used
-                self.log.info("returning binary content, length: " + rsp.headers['Content-Length'])
+                self.log.debug("returning binary content, length: " + rsp.headers['Content-Length'])
             else:
-                self.log.info("returning binary content - length unknown")
-            HTTP_CHUNK_SIZE=4096
+                self.log.debug("returning binary content - length unknown")
+            HTTP_CHUNK_SIZE = 4096
             http_chunks = []
             downloaded_bytes = 0
             for http_chunk in rsp.iter_content(chunk_size=HTTP_CHUNK_SIZE):
                 if http_chunk:  # filter out keep alive chunks
-                    self.log.info(f"got http_chunk - {len(http_chunk)} bytes")
+                    self.log.debug(f"got http_chunk - {len(http_chunk)} bytes")
                     downloaded_bytes += len(http_chunk)
                     http_chunks.append(http_chunk)
             if len(http_chunks) == 0:
@@ -988,15 +1000,14 @@ class HLObject(CommonStateObject):
                 rsp_content = bytearray(downloaded_bytes)
                 index = 0
                 for http_chunk in http_chunks:
-                    rsp_content[index:(index+len(http_chunk))] = http_chunk
+                    rsp_content[index:(index + len(http_chunk))] = http_chunk
                     index += len(http_chunk)
             return rsp_content
         else:
             # assume JSON
             rsp_json = json.loads(rsp.text)
-            self.log.debug("rsp_json: {}".format(rsp_json))
+            self.log.debug(f"rsp_json - {len(rsp.text)} bytes")
             return rsp_json
-
 
     def PUT(self, req, body=None, params=None, format="json", replace=False):
         if self.id.http_conn is None:
@@ -1004,13 +1015,13 @@ class HLObject(CommonStateObject):
 
         # try to do a PUT to the domain
         rsp = self._id._http_conn.PUT(req, body=body, params=params, format=format)
-        self.log.info("PUT rsp status_code: {}".format(rsp.status_code))
+        self.log.info(f"PUT rsp status_code: {rsp.status_code}")
 
         if rsp.status_code not in (200, 201, 204):
             if rsp.status_code == 409:
                 # Conflict error
                 if replace:
-                    self.log.info("replacing resource: {}".format(req))
+                    self.log.info(f"replacing resource: {req}")
                     rsp = self.id._http_conn.DELETE(req)
                     if rsp.status_code != 200:
                         raise IOError(rsp.reason)
@@ -1020,25 +1031,25 @@ class HLObject(CommonStateObject):
                 else:
                     raise RuntimeError(rsp.reason)
             else:
-                raise IOError(rsp.reason)
+                raise IOError(f"{rsp.reason}:{rsp.status_code}")
 
         if rsp.text:
             rsp_json = json.loads(rsp.text)
             return rsp_json
 
-    def POST(self, req, body=None, format="json"):
+    def POST(self, req, body=None, params=None, format="json"):
         if self.id.http_conn is None:
             raise IOError("object not initialized")
 
         # try to do a POST to the domain
 
-        self.log.info("POST: {} [{}]".format(req, self.id.domain))
+        self.log.info(f"POST: {req} [{self.id.domain}]")
 
-        rsp = self.id._http_conn.POST(req, body=body, format=format)
+        rsp = self.id._http_conn.POST(req, body=body, params=params, format=format)
         if rsp.status_code == 409:
             raise ValueError("name already exists")
         if rsp.status_code not in (200, 201):
-            self.log.error("POST error - status_code: {}, reason: {}".format(rsp.status_code, rsp.reason))
+            self.log.error(f"POST error - status_code: {rsp.status_code}, reason: {rsp.reason}")
             raise IOError(rsp.reason)
 
         if 'Content-Type' in rsp.headers and rsp.headers['Content-Type'] == "application/octet-stream":
@@ -1053,37 +1064,42 @@ class HLObject(CommonStateObject):
             rsp_json = json.loads(rsp.text)
             return rsp_json
 
-    def DELETE(self, req):
+    def DELETE(self, req, params=None):
         if self.id.http_conn is None:
             raise IOError("object not initialized")
 
         # try to do a DELETE of the resource
 
-        self.log.info("DEL: {} [{}]".format(req, self.id.domain))
-        rsp = self.id._http_conn.DELETE(req)
+        self.log.info(f"DEL: {req} [{self.id.domain}]")
+        rsp = self.id._http_conn.DELETE(req, params=params)
         # self.log.info("RSP: " + str(rsp.status_code) + ':' + rsp.text)
         if rsp.status_code != 200:
             raise IOError(rsp.reason)
 
-    def __init__(self, oid, file=None):
+    def __init__(self, oid, file=None, track_order=None):
         """ Setup this object, given its low-level identifier """
         self._id = oid
         self.log = self._id.http_conn.logging
-        self.req_prefix  = None # derived class should set this to the URI of the object
+        self.req_prefix = None  # derived class should set this to the URI of the object
         self._file = file
-        #self._name = None
 
-        if not self.log.handlers:
-            # setup logging
-            log_path = os.getcwd()
-            if not os.access(log_path, os.W_OK):
-                log_path = "/tmp"
-            log_file = os.path.join(log_path, "h5pyd.log")
-            self.log.setLevel(logging.INFO)
-            fh = logging.FileHandler(log_file)
-            self.log.addHandler(fh)
+        if track_order is None:
+            # set order based on group creation props
+            obj_json = self.id.obj_json
+            if "creationProperties" in obj_json:
+                cpl = obj_json["creationProperties"]
+            else:
+                cpl = {}
+            if "CreateOrder" in cpl:
+                createOrder = cpl["CreateOrder"]
+                if not createOrder or createOrder == "0":
+                    self._track_order = False
+                else:
+                    self._track_order = True
+            else:
+                self._track_order = False
         else:
-            pass
+            self._track_order = track_order
 
     def __hash__(self):
         return hash(self.id.id)
@@ -1099,7 +1115,6 @@ class HLObject(CommonStateObject):
     def __bool__(self):
         with phil:
             return bool(self.id)
-    __nonzero__ = __bool__  # Python 2.7 compat
 
     def getACL(self, username):
         req = self._req_prefix + '/acls/' + username
@@ -1207,6 +1222,7 @@ class MutableMappingHDF5(MappingHDF5, MutableMapping):
     """
 
     pass
+
 
 class Empty(object):
 

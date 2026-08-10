@@ -35,25 +35,24 @@ else:
 
 cfg = Config()
 
+
 def getFile(domain, mode="r"):
     username = cfg["hs_username"]
     password = cfg["hs_password"]
     endpoint = cfg["hs_endpoint"]
     bucket = cfg["hs_bucket"]
     fh = h5pyd.File(domain, mode=mode, endpoint=endpoint, username=username,
-                   password=password, bucket=bucket, use_cache=True)
+                    password=password, bucket=bucket, use_cache=True)
     return fh
 
 
 def diff_attrs(src, tgt, ctx):
     """compare attributes of src and tgt"""
-    msg = "checking attributes of {}".format(src.name)
+    msg = f"checking attributes of {src.name}"
     logging.debug(msg)
 
     if len(src.attrs) != len(tgt.attrs):
-        msg = "<{}> have a different number of attribute from <{}>".format(
-            src.name, tgt.name
-        )
+        msg = f"<{src.name}> have a different number of attribute from <{tgt.name}>"
         logging.info(msg)
         if not ctx["quiet"]:
             print(msg)
@@ -61,14 +60,12 @@ def diff_attrs(src, tgt, ctx):
         return False
 
     for name in src.attrs:
-        msg = "checking attribute {} of {}".format(name, src.name)
+        msg = f"checking attribute {name} of {src.name}"
         logging.debug(msg)
         if ctx["verbose"]:
             print(msg)
         if name not in tgt.attrs:
-            msg = "<{}>  has attribute {} not found in <{}>".format(
-                src.name, name, tgt.name
-            )
+            msg = f"<{src.name}>  has attribute {name} not found in <{tgt.name}>"
             logging.info(msg)
             if not ctx["quiet"]:
                 print(msg)
@@ -79,33 +76,28 @@ def diff_attrs(src, tgt, ctx):
         if isinstance(src_attr, np.ndarray):
             # compare shape, type, and values
             if src_attr.dtype != tgt_attr.dtype:
-                msg = "Type of attribute {} of <{}> is different".format(name, src.name)
+                msg = f"Type of attribute {name} of <{src.name}> is different"
                 logging.info(msg)
                 if not ctx["quiet"]:
                     print(msg)
                 ctx["differences"] += 1
                 return False
             if src_attr.shape != tgt_attr.shape:
-                msg = "Shape of attribute {} of <{}> is different".format(
-                    name, src.name
-                )
+                msg = f"Shape of attribute {name} of <{src.name}> is different"
                 logging.info(msg)
                 if not ctx["quiet"]:
                     print(msg)
                 ctx["differences"] += 1
                 return False
-            if hash(src_attr.tostring()) != hash(tgt_attr.tostring()):
-                msg = "values for attribute {} of <{}> differ".format(name, src.name)
-                logging.info(msg)
+            if hash(src_attr.tobytes()) != hash(tgt_attr.tobytes()):
+                msg = f"values for attribute {name} of <{src.name}> differ"
                 if not ctx["quiet"]:
                     print(msg)
                 ctx["differences"] += 1
                 return False
         elif src_attr != tgt_attr:
             # returned as int or string, just compare values
-            msg = "<{}>  has attribute {} different than <{}>".format(
-                src.name, name, tgt.name
-            )
+            msg = f"<{src.name}>  has attribute {name} different than <{tgt.name}>"
             logging.info(msg)
 
             if not ctx["quiet"]:
@@ -119,7 +111,7 @@ def diff_attrs(src, tgt, ctx):
 
 def diff_group(src, ctx):
     """compare group in src and tgt"""
-    msg = "checking group <{}>".format(src.name)
+    msg = f"checking group <{src.name}>"
     logging.info(msg)
     if ctx["verbose"]:
         print(msg)
@@ -127,7 +119,7 @@ def diff_group(src, ctx):
     fout = ctx["fout"]
 
     if src.name not in fout:
-        msg = "<{}> not found in target".format(src.name)
+        msg = f"<{src.name}> not found in target"
         logging.info(msg)
         if not ctx["quiet"]:
             print(msg)
@@ -137,11 +129,9 @@ def diff_group(src, ctx):
     tgt = fout[src.name]
 
     # printed when there is a difference
-    output = "group: <{}> and <{}>".format(src.name, tgt.name)
+    output = f"group: <{src.name}> and <{tgt.name}>"
     if len(src) != len(tgt):
-        msg = "{} group have a different number of links from {}".format(
-            src.name, tgt.name
-        )
+        msg = f"{src.name} group have a different number of links from {tgt.name}"
         logging.info(msg)
         if ctx["verbose"]:
             print(msg)
@@ -152,11 +142,10 @@ def diff_group(src, ctx):
 
     for title in src:
         if ctx["verbose"]:
-            print("got link: '{}' of group <{}>".format(title, src.name))
+            print(f"got link: '{title}' of group <{src.name}>")
         if title not in tgt:
-            msg = "<{}> group has link {} not found in <{}>".format(
-                src.name, title, tgt.name
-            )
+            msg = f"<{src.name}> group has link {title} not found in <{tgt.name}>"
+
             logging.info(msg)
             if ctx["verbose"]:
                 print(msg)
@@ -170,9 +159,7 @@ def diff_group(src, ctx):
         lnk_tgt = tgt.get(title, getlink=True)
         lnk_tgt_type = lnk_tgt.__class__.__name__
         if lnk_src_type != lnk_tgt_type:
-            msg = "<{}> group has link {} of different type than found in <{}>".format(
-                src.name, title, tgt.name
-            )
+            msg = f"<{src.name}> group has link {title} of different type than found in <{tgt.name}>"
             logging.info(msg)
             if ctx["verbose"]:
                 print(msg)
@@ -182,17 +169,15 @@ def diff_group(src, ctx):
             return False
 
         if lnk_src_type == "HardLink":
-            logging.debug("Got hardlink: {}".format(title))
+            logging.debug(f"Got hardlink: {title}")
             # TBD: handle the case where multiple hardlinks point to same object
         elif lnk_src_type == "SoftLink":
-            msg = "Got SoftLink({}) with title: {}".format(lnk_src.path, title)
+            msg = f"Got SoftLink({lnk_src.path}) with title: {title}"
             if ctx["verbose"]:
                 print(msg)
             logging.info(msg)
             if lnk_src.path != lnk_tgt.path:
-                msg = "<{}> group has link {} with different path than <{}>".format(
-                    src.name, title, tgt.name
-                )
+                msg = f"<{src.name}> group has link {title} with different path than <{tgt.name}>"
                 if ctx["verbose"]:
                     print(msg)
                 if not ctx["quiet"]:
@@ -200,16 +185,12 @@ def diff_group(src, ctx):
                 ctx["differences"] += 1
                 return False
         elif lnk_src_type == "ExternalLink":
-            msg = "<{}> group has ExternalLink {} ({}, {})".format(
-                src.name, title, lnk_src.filename, lnk_src.path
-            )
+            msg = f"<{src.name}> group has ExternalLink {title} ({lnk_src.filename}, {lnk_src.path})"
             if ctx["verbose"]:
                 print(msg)
             logging.info(msg)
             if lnk_src.filename != lnk_tgt.filename:
-                msg = "<{}> group has external link {} with different filename than <{}>".format(
-                    src.name, title, tgt.name
-                )
+                msg = f"<{src.name}> group has external link {title} with different filename than <{tgt.name}>"
                 if ctx["verbose"]:
                     print(msg)
                 if not ctx["quiet"]:
@@ -217,9 +198,7 @@ def diff_group(src, ctx):
                 ctx["differences"] += 1
                 return False
             if lnk_src.path != lnk_tgt.path:
-                msg = "<{}> group has external link {} with different path than <{}>".format(
-                    src.name, title, tgt.name
-                )
+                msg = f"<{src.name}> group has external link {title} with different path than <{tgt.name}>"
                 if ctx["verbose"]:
                     print(msg)
                 if not ctx["quiet"]:
@@ -227,7 +206,7 @@ def diff_group(src, ctx):
                 ctx["differences"] += 1
                 return False
         else:
-            msg = "Unexpected link type: {}".format(lnk_src_type)
+            msg = f"Unexpected link type: {lnk_src_type}"
             logging.warning(msg)
             if ctx["verbose"]:
                 print(msg)
@@ -242,7 +221,7 @@ def diff_group(src, ctx):
 
 def diff_datatype(src, ctx):
     """compare datatype objects in src and tgt"""
-    msg = "checking datatype <{}>".format(src.name)
+    msg = f"checking datatype <{src.name}>"
     logging.info(msg)
     if ctx["verbose"]:
         print(msg)
@@ -250,7 +229,7 @@ def diff_datatype(src, ctx):
     fout = ctx["fout"]
 
     if src.name not in fout:
-        msg = "<{}> not found in target".format(src.name)
+        msg = f"<{src.name}> not found in target"
         logging.info(msg)
         if not ctx["quiet"]:
             print(msg)
@@ -259,7 +238,7 @@ def diff_datatype(src, ctx):
     tgt = fout[src.name]
 
     if tgt.dtype != src.dtype:
-        msg = "Type of <{}> is different".format(src.name)
+        msg = f"Type of <{src.name}> is different"
         logging.info(msg)
         if not ctx["quiet"]:
             print(msg)
@@ -275,7 +254,7 @@ def diff_datatype(src, ctx):
 
 def diff_dataset(src, ctx):
     """compare dataset in src and tgt"""
-    msg = "checking dataset <{}>".format(src.name)
+    msg = f"checking dataset <{src.name}>"
     logging.info(msg)
     if ctx["verbose"]:
         print(msg)
@@ -283,7 +262,7 @@ def diff_dataset(src, ctx):
     fout = ctx["fout"]
 
     if src.name not in fout:
-        msg = "<{}> not found in target".format(src.name)
+        msg = f"<{src.name}> not found in target"
         logging.info(msg)
         if not ctx["quiet"]:
             print(msg)
@@ -294,7 +273,7 @@ def diff_dataset(src, ctx):
     try:
         tgt_shape = tgt.shape
     except AttributeError:
-        msg = "<{}> in target not a dataset".format(src.name)
+        msg = f"<{src.name}> in target not a dataset"
         logging.info(msg)
         if not ctx["quiet"]:
             print(msg)
@@ -302,9 +281,9 @@ def diff_dataset(src, ctx):
         return False
 
     # printed when there is a difference
-    output = "dataset: <{}> and <{}>".format(src.name, tgt.name)
+    output = f"dataset: <{src.name}> and <{tgt.name}>"
     if tgt_shape != src.shape:
-        msg = "Shape of <{}> is different".format(src.name)
+        msg = f"Shape of <{src.name}> is different"
         logging.info(msg)
         if not ctx["quiet"]:
             print(output)
@@ -313,7 +292,7 @@ def diff_dataset(src, ctx):
         return False
 
     if tgt.dtype != src.dtype:
-        msg = "Type of <{}> is different".format(src.name)
+        msg = f"Type of <{src.name}> is different"
         logging.info(msg)
         if not ctx["quiet"]:
             print(output)
@@ -339,7 +318,7 @@ def diff_dataset(src, ctx):
         if is_equal:
             return True
         else:
-            msg = "values for scalar datasets {} differ".format(src.name)
+            msg = f"values for scalar datasets {src.name} differ"
             logging.info(msg)
             if not ctx["quiet"]:
                 print(msg)
@@ -347,10 +326,9 @@ def diff_dataset(src, ctx):
                 print("quiet output differ")
             ctx["differences"] += 1
             return False
-        
 
     if src.chunks is None:
-        # assume that the dataset is small enough that we can 
+        # assume that the dataset is small enough that we can
         # read all the values into memory.
         # TBD: use some sort  of psuedo-chunk iteration for large
         # contiguous datasetsChunkIter
@@ -360,7 +338,7 @@ def diff_dataset(src, ctx):
         if is_equal:
             return True
         else:
-            msg = "values for datasets {} differ".format(src.name)
+            msg = f"values for datasets {src.name} differ"
             logging.info(msg)
             if not ctx["quiet"]:
                 print(msg)
@@ -372,16 +350,16 @@ def diff_dataset(src, ctx):
         it = src.iter_chunks()
 
         for s in it:
-            msg = "checking dataset data for slice: {}".format(s)
+            msg = f"checking dataset data for slice: {s}"
             logging.debug(msg)
 
             arr_src = src[s]
             if len(s) > 0:
-                msg = "got src array {}".format(arr_src.shape)
+                msg = f"got src array {arr_src.shape}"
                 logging.debug(msg)
             arr_tgt = tgt[s]
             if len(s) > 0:
-                msg = "got tgt array {}".format(arr_tgt.shape)
+                msg = f"got tgt array {arr_tgt.shape}"
                 logging.debug(msg)
 
             is_equal = True
@@ -389,14 +367,14 @@ def diff_dataset(src, ctx):
                 if isinstance(arr_tgt, np.ndarray):
                     is_equal = np.array_equal(arr_src, arr_tgt)
                 else:
-                    is_equal = False # type not the same
+                    is_equal = False  # type not the same
             else:
                 # just compare the objects directly
                 if arr_src != arr_tgt:
                     is_equal = False
-            
+
             if not is_equal:
-                msg = "values for dataset {} differ for slice: {}".format(src.name, s)
+                msg = f"values for dataset {src.name} differ for slice: {s}"
                 logging.info(msg)
                 if not ctx["quiet"]:
                     print(msg)
@@ -404,7 +382,7 @@ def diff_dataset(src, ctx):
                 return False
 
     except (IOError, TypeError) as e:
-        msg = "ERROR : failed to copy dataset data : {}".format(str(e))
+        msg = f"ERROR : failed to copy dataset data : {str(e)}"
         logging.error(msg)
         print(msg)
 
@@ -435,7 +413,7 @@ def diff_file(fin, fout, verbose=False, nodata=False, noattr=False, quiet=False)
         elif class_name == "Datatype":
             diff_datatype(obj, ctx)
         else:
-            logging.error("no handler for object class: {}".format(type(obj)))
+            logging.error(f"no handler for object class: {type(obj)}")
 
     # check links in root group
     diff_group(fin, ctx)
@@ -461,7 +439,7 @@ def usage():
     for name in option_names:
         help_msg = cfg.get_help_message(name)
         if help_msg:
-            print(f"    {help_msg}")  
+            print(f"    {help_msg}")
     print("")
     print("Examples:")
     print(f"     {cmd} myfile.h5  /home/myfolder/myfile.h5")
@@ -499,7 +477,7 @@ def main():
         usage()
 
     if cfg["quiet"] and cfg["verbose"]:
-        msg = "--quiet and --verbose options can't be used together"        
+        msg = "--quiet and --verbose options can't be used together"
         sys.exit(msg)
 
     if len(args) < 2:
@@ -513,7 +491,6 @@ def main():
     loglevel = cfg.get_loglevel()
     logging.basicConfig(filename=logfname, format='%(levelname)s %(asctime)s %(message)s', level=loglevel)
     logging.debug(f"set log_level to {loglevel}")
-
 
     rc = 0
     s3 = None  # s3fs instance
@@ -573,7 +550,6 @@ def main():
         kwargs["noattr"] = cfg["noattr"]
         kwargs["quiet"] = cfg["quiet"]
         rc = diff_file(fin, fout, **kwargs)
-    
 
         if not cfg["quiet"] and rc > 0:
             print(f"{rc} differences found")

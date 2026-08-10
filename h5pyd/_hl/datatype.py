@@ -14,11 +14,12 @@ from __future__ import absolute_import
 
 import posixpath as pp
 
-#from ..h5t import TypeID
+# from ..h5t import TypeID
 from .base import HLObject
 
-from .objectid import  TypeID
+from .objectid import TypeID
 from .h5type import createDataType
+
 
 class Datatype(HLObject):
 
@@ -41,12 +42,11 @@ class Datatype(HLObject):
         """
         if not isinstance(bind, TypeID):
             # todo: distinguish type from other hl objects
-            raise ValueError("%s is not a TypeID" % bind)
+            raise ValueError(f"{bind} is not a TypeID")
         HLObject.__init__(self, bind)
 
         self._dtype = createDataType(self.id.type_json)
         self._req_prefix = "/datatypes/" + self.id.uuid
-
 
     def __repr__(self):
         if not self.id:
@@ -55,7 +55,7 @@ class Datatype(HLObject):
             namestr = '("anonymous")'
         else:
             name = pp.basename(pp.normpath(self.name))
-            namestr = '"%s"' % (name if name != '' else '/')
+            namestr = f"{name if name != '' else '/'}"
             if name:
                 namestr = f'"{name}"'
             else:

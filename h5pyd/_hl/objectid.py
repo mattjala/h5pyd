@@ -12,9 +12,11 @@
 
 from __future__ import absolute_import
 from datetime import datetime
+import json
 import pytz
 import time
 from .h5type import createDataType
+
 
 def parse_lastmodified(datestr):
     """Turn last modified datetime string into a datetime object."""
@@ -48,15 +50,6 @@ class ObjectID:
         return self.uuid
 
     @property
-    def objtype_code(self):
-        """ return one char code to denote what type of object
-        g: group
-        d: dataset
-        t: committed datatype
-        """
-        return self._objtype_code
-
-    @property
     def domain(self):
         """ domain for this obj """
         return self.http_conn.domain
@@ -76,8 +69,20 @@ class ObjectID:
         """ http connector """
         return self._http_conn
 
-    def __init__(self, parent, item, objtype_code=None,
-                 http_conn=None, **kwds):
+    @property
+    def collection_type(self):
+        """ Return collection type based on uuid """
+        if self._uuid.startswith("g-"):
+            collection_type = "groups"
+        elif self._uuid.startswith("t-"):
+            collection_type = "datatypes"
+        elif self._uuid.startswith("d-"):
+            collection_type = "datasets"
+        else:
+            raise IOError(f"Unexpected uuid: {self._uuid}")
+        return collection_type
+
+    def __init__(self, parent, item, http_conn=None, **kwds):
 
         """Create a new objectId.
         """
@@ -108,8 +113,6 @@ class ObjectID:
         else:
             raise IOError("Expected parent to have http connector")
 
-        self._objtype_code = objtype_code
-
     def __eq__(self, other):
         if isinstance(other, self.__class__):
             return self._uuid == other._uuid
@@ -118,6 +121,25 @@ class ObjectID:
 
     def __ne__(self, other):
         return not self.__eq__(other)
+
+    def refresh(self):
+        """ get the latest obj_json data from server """
+
+        # will need to get JSON from server
+        req = f"/{self.collection_type}/{self.id}"
+        # make server request
+        rsp = self._http_conn.GET(req)
+        if rsp.status_code != 200:
+            raise IOError(f"refresh request got status: {rsp.satus_code}")
+        item = json.loads(rsp.text)
+
+        self._obj_json = item
+        self._modified = parse_lastmodified(item['lastModified'])
+
+        objdb = self.http_conn._objdb
+        if objdb and self.id in objdb:
+            # delete any cached data from objdb so that gets will reflect server state
+            del objdb[self.id]
 
     def close(self):
         """Remove handles to id.
@@ -133,8 +155,6 @@ class ObjectID:
     def __del__(self):
         """ cleanup """
         self.close()
-        
-    __nonzero__ = __bool__  # Python 2.7 compat
 
 
 class TypeID(ObjectID):
@@ -148,11 +168,22 @@ class TypeID(ObjectID):
         dtype = createDataType(type_json)
         return dtype
 
+    @property
+    def tcpl_json(self):
+        if 'creationProperties' in self._obj_json:
+            tcpl = self._obj_json['creationProperties']
+        else:
+            tcpl = {}
+        return tcpl
+
     def __init__(self, parent, item, **kwds):
         """Create a new TypeID.
         """
 
-        ObjectID.__init__(self, parent, item, objtype_code='t', **kwds)
+        ObjectID.__init__(self, parent, item, **kwds)
+
+        if self.collection_type != "datatypes":
+            raise IOError(f"Unexpected collection_type: {self._collection_type}")
 
 
 class DatasetID(ObjectID):
@@ -190,12 +221,14 @@ class DatasetID(ObjectID):
     @property
     def layout(self):
         layout = None
-        if "layout" in self._obj_json:
-            layout = self._obj_json['layout']
+
+        if 'layout' in self.obj_json:
+            layout = self.obj_json['layout']
         else:
-            dcpl = self._obj_json['creationProperties']
-            if 'layout' in dcpl:
+            dcpl = self.dcpl_json
+            if dcpl and 'layout' in dcpl:
                 layout = dcpl['layout']
+
         return layout
 
     @property
@@ -203,18 +236,21 @@ class DatasetID(ObjectID):
 
         chunks = None
         layout = self.layout
-         
-        if layout and layout['class'] in  ('H5D_CHUNKED', 'H5D_CHUNKED_REF', 'H5D_CHUNKED_REF_INDIRECT'):
+
+        if layout and layout['class'] in ('H5D_CHUNKED', 'H5D_CHUNKED_REF', 'H5D_CHUNKED_REF_INDIRECT'):
             if "dims" in layout:
                 chunks = layout['dims']
-             
+
         return chunks
 
     def __init__(self, parent, item, **kwds):
         """Create a new DatasetID.
         """
 
-        ObjectID.__init__(self, parent, item, objtype_code='d', **kwds)
+        ObjectID.__init__(self, parent, item, **kwds)
+
+        if self.collection_type != "datasets":
+            raise IOError(f"Unexpected collection_type: {self._collection_type}")
 
 
 class GroupID(ObjectID):
@@ -223,5 +259,15 @@ class GroupID(ObjectID):
         """Create a new GroupID.
         """
 
-        ObjectID.__init__(self, parent, item, http_conn=http_conn,
-                          objtype_code='g')
+        ObjectID.__init__(self, parent, item, http_conn=http_conn, **kwds)
+
+        if self.collection_type != "groups":
+            raise IOError(f"Unexpected collection_type: {self._collection_type}")
+
+    @property
+    def gcpl_json(self):
+        if 'creationProperties' in self._obj_json:
+            gcpl = self._obj_json['creationProperties']
+        else:
+            gcpl = {}
+        return gcpl

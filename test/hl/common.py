@@ -12,36 +12,23 @@
 
 from __future__ import absolute_import
 
-import sys
 import os
 import os.path as op
 import tempfile
 import time
 import config
 
-
-from six import unichr
-
 import numpy as np
-
-if sys.version_info >= (2, 7) or sys.version_info >= (3, 2):
-    import unittest as ut
-else:
-    try:
-        import unittest2 as ut
-    except ImportError:
-        raise ImportError(
-            'unittest2 is required to run the test suite with python-%d.%d'
-            % (sys.version_info[:2])
-            )
-
+import unittest as ut
+from platform import system
+from h5pyd import getServerInfo
 
 # Check if non-ascii filenames are supported
 # Evidently this is the most reliable way to check
 # See also h5py issue #263 and ipython #466
 # To test for this, run the testsuite with LC_ALL=C
 try:
-    testfile, fname = tempfile.mkstemp(unichr(0x03b7))
+    testfile, fname = tempfile.mkstemp(chr(0x03b7))
 except UnicodeError:
     UNICODE_FILENAMES = False
 else:
@@ -50,6 +37,32 @@ else:
     os.unlink(fname)
     del fname
     del testfile
+
+
+def getTestFileName(basename, subfolder=None):
+    """
+    Get filepath for a test case given a testname
+    """
+
+    if config.get("use_h5py"):
+        filename = "out"
+        if not os.path.isdir(filename):
+            os.mkdir(filename)
+        if subfolder:
+            filename = os.path.join(filename, subfolder)
+            if not os.path.isdir(filename):
+                os.mkdir(filename)
+        filename = os.path.join(filename, f"{basename}.h5")
+    else:
+        if "H5PYD_TEST_FOLDER" in os.environ:
+            filename = os.environ["H5PYD_TEST_FOLDER"]
+        else:
+            # default to the root folder
+            filename = "/"
+        if subfolder:
+            filename = os.path.join(filename, subfolder)
+        filename = os.path.join(filename, f"{basename}.h5")
+    return filename
 
 
 class TestCase(ut.TestCase):
@@ -73,7 +86,7 @@ class TestCase(ut.TestCase):
         # HS_USERNAME is the username h5pyd will look up if
         #   if not provided in the File constructor
         user1 = {}
-        if  "HS_USERNAME" in os.environ:
+        if "HS_USERNAME" in os.environ:
             user1["name"] = os.environ["HS_USERNAME"]
         else:
             user1["name"] = "test_user1"
@@ -87,7 +100,7 @@ class TestCase(ut.TestCase):
     @property
     def test_user2(self):
         user2 = {}
-        if  "TEST12_USERNAME" in os.environ:
+        if "TEST12_USERNAME" in os.environ:
             user2["name"] = os.environ["TEST2_USERNAME"]
         else:
             user2["name"] = "test_user2"
@@ -109,22 +122,22 @@ class TestCase(ut.TestCase):
     @classmethod
     def setUpClass(cls):
         pass
-        #cls.tempdir = tempfile.mkdtemp(prefix='h5py-test_')
+        # cls.tempdir = tempfile.mkdtemp(prefix='h5py-test_')
 
     @classmethod
     def tearDownClass(cls):
         pass
-        #shutil.rmtree(cls.tempdir)
+        # shutil.rmtree(cls.tempdir)
 
     def setUp(self):
         self.test_dir = str(int(time.time()))
-        #self.f = h5py.File(self.mktemp(), 'w')
+        # self.f = h5py.File(self.mktemp(), 'w')
 
     def tearDown(self):
         try:
             if self.f:
                 self.f.close()
-        except:
+        except Exception:
             pass
 
     if not hasattr(ut.TestCase, 'assertSameElements'):
@@ -136,7 +149,7 @@ class TestCase(ut.TestCase):
                     if x == y:
                         match = True
                 if not match:
-                    raise AssertionError("Item '%s' appears in a but not b" % x)
+                    raise AssertionError(f"Item '{x}' appears in a but not b")
 
             for x in b:
                 match = False
@@ -144,7 +157,7 @@ class TestCase(ut.TestCase):
                     if x == y:
                         match = True
                 if not match:
-                    raise AssertionError("Item '%s' appears in b but not a" % x)
+                    raise AssertionError(f"Item '{x}' appears in b but not a")
 
     def assertArrayEqual(self, dset, arr, message=None, precision=None):
         """ Make sure dset and arr have the same shape, dtype and contents, to
@@ -157,42 +170,42 @@ class TestCase(ut.TestCase):
         if message is None:
             message = ''
         else:
-            message = ' (%s)' % message
+            message = f' ({message})'
 
         if np.isscalar(dset) or np.isscalar(arr):
             self.assertTrue(
                 np.isscalar(dset) and np.isscalar(arr),
-                'Scalar/array mismatch ("%r" vs "%r")%s' % (dset, arr, message)
+                f'Scalar/array mismatch ("{dset}" vs "{arr}"){message}'
             )
             self.assertTrue(
                 dset - arr < precision,
-                "Scalars differ by more than %.3f%s" % (precision, message)
+                f"Scalars differ by more than {precision:.3}{message}"
             )
             return
 
         self.assertTrue(
             dset.shape == arr.shape,
-            "Shape mismatch (%s vs %s)%s" % (dset.shape, arr.shape, message)
-            )
+            f"Shape mismatch ({dset.shape} vs {arr.shape}){message}"
+        )
         self.assertTrue(
             dset.dtype == arr.dtype,
-            "Dtype mismatch (%s vs %s)%s" % (dset.dtype, arr.dtype, message)
-            )
+            f"Dtype mismatch ({dset.dtype} vs {arr.dtype}){message}"
+        )
 
         if arr.dtype.names is not None:
             for n in arr.dtype.names:
-                message = '[FIELD %s] %s' % (n, message)
+                message = f'[FIELD {n}] {message}'
                 self.assertArrayEqual(dset[n], arr[n], message=message, precision=precision)
         elif arr.dtype.kind in ('i', 'f'):
             self.assertTrue(
                 np.all(np.abs(dset[...] - arr[...]) < precision),
-                "Arrays differ by more than %.3f%s" % (precision, message)
-                )
+                f"Arrays differ by more than {precision:.3}{message}"
+            )
         else:
             self.assertTrue(
                 np.all(dset[...] == arr[...]),
-                "Arrays are not equal (dtype %s) %s" % (arr.dtype.str, message)
-                )
+                f"Arrays are not equal (dtype {arr.dtype.str}) {message}"
+            )
 
     def assertNumpyBehavior(self, dset, arr, s):
         """ Apply slicing arguments "s" to both dset and arr.
@@ -214,28 +227,15 @@ class TestCase(ut.TestCase):
             with self.assertRaises(exc):
                 dset[s]
 
-    def getFileName(self, basename):
+    def getFileName(self, basename, subfolder=None):
         """
         Get filepath for a test case given a testname
         """
 
-        if config.get("use_h5py"):
-            if not op.isdir("out"):
-                os.mkdir("out")
-            filename = "out/" + basename + ".h5"
-        else:
-            if "H5PYD_TEST_FOLDER" in os.environ:
-                domain = os.environ["H5PYD_TEST_FOLDER"]
-            else:
-                domain = "h5pyd_test.hdfgroup.org"
-            if domain.find('/') > -1:
-                # Use path-style domain naming
-                filename = op.join(domain, basename)
-                filename += ".h5"
-            else:
-                filename = basename + "." + domain
-        return filename
+        # Just call the external function
+        filename = getTestFileName(basename, subfolder=subfolder)
 
+        return filename
 
     def getPathFromDomain(self, domain):
         """
@@ -243,18 +243,25 @@ class TestCase(ut.TestCase):
         E.g. "mytest.h5pyd_test.hdfgroup.org" to
              "/org/hdfgroup/h5pyd_test/mytest
         """
-        if domain.find('/') > -1:
+        if (domain.find('/') > -1) or (domain.find(':') > -1):
             # looks like the domain already is specified as a path
             return domain
 
         names = domain.split('.')
         names.reverse()
-        path = '/'
+
+        # strip empty names
+        names = [name for name in names if name]
+
+        path = os.path.abspath(os.sep)
+
         for name in names:
-            if name:
-                 path += name
-                 path += '/'
-        path = path[:-1]  # strip trailing slash
+            path = os.path.join(path, name)
+
+        # strip trailing slash
+        if path[-1] == os.sep:
+            path = path[:-1]
+
         return path
 
     def is_hsds(self, id=None):
@@ -268,3 +275,10 @@ class TestCase(ut.TestCase):
             return True
         else:
             return False
+
+    def hsds_version(self):
+        """ Return the version of the HSDS server, or None if not HSDS.
+        """
+
+        rsp = getServerInfo()
+        return rsp["hsds_version"]

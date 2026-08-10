@@ -22,7 +22,26 @@ except ImportError as e:
     sys.exit(1)
 
 # copy rather than link for any datasets with product of extents less than the following
-MIN_DSET_ELEMENTS_FOR_LINKING=512
+MIN_DSET_ELEMENTS_FOR_LINKING = 512
+
+# adjust chunk shape to fit between min and max chunk sizes when possible
+MIN_CHUNK_SIZE = 1 * 1024 * 1024
+MAX_CHUNK_SIZE = 8 * 1024 * 1024
+CHUNK_BASE = 64 * 1024    # Multiplier by which chunks are adjusted
+
+H5Z_FILTER_MAP = {
+    32001: "blosclz",
+    32004: "lz4",
+    32008: "bitshuffle",
+    32015: "zstd",
+}
+
+
+# check if hdf5 library version supports chunk iteration
+hdf_library_version = h5py.version.hdf5_version_tuple
+library_has_chunk_iter = (hdf_library_version >= (1, 14, 0) or (
+    hdf_library_version < (1, 12, 0) and (hdf_library_version >= (1, 10, 10))))
+
 
 def dump_dtype(dt):
     if not isinstance(dt, np.dtype):
@@ -98,6 +117,7 @@ def has_reference(dtype):
         has_ref = has_reference(basedt)
     return has_ref
 
+
 def get_reftype(obj):
     if is_h5py(obj):
         ref_type = h5py. special_dtype(ref=h5py.Reference)
@@ -126,13 +146,38 @@ def get_fillvalue(dset):
 
 
 def is_compact(dset):
-    if isinstance(dset.id.id, str):
-        return False  # compact storage not used with HSDS
-    cpl = dset.id.get_create_plist()
-    if cpl.get_layout() == h5py.h5d.COMPACT:
-        return True
+    if is_h5py(dset):
+        cpl = dset.id.get_create_plist()
+        if cpl.get_layout() == h5py.h5d.COMPACT:
+            return True
+        else:
+            return False
     else:
-        return False
+        return False  # compact storage not used with HSDS
+
+
+# ----------------------------------------------------------------------------------
+def get_chunk_layout(dset):
+    if is_h5py(dset):
+        msg = "get_chunk_layout called on hdf5 dataset"
+        logging.error(msg)
+        raise IOError(msg)
+    dset_json = dset.id.dcpl_json
+    if "layout" not in dset_json:
+        msg = f"expect to find layout key in dset_json: {dset_json}"
+        logging.error(msg)
+        raise IOError(msg)
+    layout = dset_json["layout"]
+    logging.debug(f"got chunk layout for dset id: {dset.id.id}: {layout}")
+    return layout
+
+
+def get_chunk_layout_class(dset):
+    layout_json = get_chunk_layout(dset)
+    if layout_json and "class" in layout_json:
+        return layout_json["class"]
+    else:
+        return None
 
 
 def convert_dtype(srcdt, ctx):
@@ -191,6 +236,139 @@ def convert_dtype(srcdt, ctx):
     return tgt_dt
 
 
+def guess_chunk(shape, typesize):
+    """ Guess an appropriate chunk layout for a dataset, given its shape and
+    the size of each element in bytes.  Will allocate chunks only as large
+    as MAX_SIZE.  Chunks are generally close to some power-of-2 fraction of
+    each axis, slightly favoring bigger values for the last index.
+
+    Undocumented and subject to change without warning.
+    """
+
+    # For unlimited dimensions we have to guess 1024
+    shape = tuple((x if x != 0 else 1024) for i, x in enumerate(shape))
+
+    ndims = len(shape)
+    if ndims == 0:
+        raise ValueError("Chunks not allowed for scalar datasets.")
+
+    chunks = np.array(shape, dtype='=f8')
+    if not np.all(np.isfinite(chunks)):
+        raise ValueError("Illegal value in chunk tuple")
+
+    # Determine the optimal chunk size in bytes using a PyTables expression.
+    # This is kept as a float.
+    dset_size = np.prod(chunks) * typesize
+    target_size = CHUNK_BASE * (2 ** np.log10(dset_size / (1024. * 1024)))
+
+    if target_size > MIN_CHUNK_SIZE:
+        target_size = MAX_CHUNK_SIZE
+    elif target_size < MIN_CHUNK_SIZE:
+        target_size = MIN_CHUNK_SIZE
+
+    idx = 0
+    while True:
+        # Repeatedly loop over the axes, dividing them by 2.  Stop when:
+        # 1a. We're smaller than the target chunk size, OR
+        # 1b. We're within 50% of the target chunk size, AND
+        #  2. The chunk is smaller than the maximum chunk size
+
+        chunk_bytes = np.prod(chunks) * typesize
+
+        if (chunk_bytes < target_size or abs(chunk_bytes - target_size) / target_size < 0.5) and \
+           chunk_bytes < MAX_CHUNK_SIZE:
+            break
+
+        if np.prod(chunks) == 1:
+            break  # Element size larger than CHUNK_MAX
+        chunks[idx % ndims] = np.ceil(chunks[idx % ndims] / 2.0)
+        idx += 1
+
+    return tuple(int(x) for x in chunks)
+
+
+class ChunkIterator(object):
+    """
+    Class to iterate through list of chunks of a given dataset
+    """
+
+    def __init__(self, dset, source_sel=None):
+        self._shape = dset.shape
+        rank = len(dset.shape)
+
+        if not dset.chunks:
+            # coniguous layout - create some psuedo-chunks so we do't
+            # try to read to much data in one selection
+            self._layout = guess_chunk(dset.shape, dset.dtype.itemsize)
+        elif isinstance(dset.chunks, dict):
+            self._layout = dset.chunks["dims"]
+        else:
+            self._layout = dset.chunks
+
+        if source_sel is None:
+            # select over entire dataset
+            slices = []
+            for dim in range(rank):
+                slices.append(slice(0, self._shape[dim]))
+            self._sel = tuple(slices)
+        else:
+            if isinstance(source_sel, slice):
+                self._sel = (source_sel,)
+            else:
+                self._sel = source_sel
+        if len(self._sel) != rank:
+            raise ValueError(
+                "Invalid selection - selection region must have same rank as dataset"
+            )
+        self._chunk_index = []
+        for dim in range(rank):
+            s = self._sel[dim]
+            if s.start < 0 or s.stop > self._shape[dim] or s.stop <= s.start:
+                msg = "Invalid selection - selection region must be within dataset space"
+                raise ValueError(msg)
+            index = s.start // self._layout[dim]
+            self._chunk_index.append(index)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        rank = len(self._shape)
+        slices = []
+        if rank == 0 or self._chunk_index[0] * self._layout[0] >= self._sel[0].stop:
+            # ran past the last chunk, end iteration
+            raise StopIteration()
+
+        for dim in range(rank):
+            s = self._sel[dim]
+            start = self._chunk_index[dim] * self._layout[dim]
+            stop = (self._chunk_index[dim] + 1) * self._layout[dim]
+            # adjust the start if this is an edge chunk
+            if start < s.start:
+                start = s.start
+            if stop > s.stop:
+                stop = s.stop  # trim to end of the selection
+            s = slice(start, stop, 1)
+            slices.append(s)
+
+        # bump up the last index and carry forward if we run outside the selection
+        dim = rank - 1
+        while dim >= 0:
+            s = self._sel[dim]
+            self._chunk_index[dim] += 1
+
+            chunk_end = self._chunk_index[dim] * self._layout[dim]
+            if chunk_end < s.stop:
+                # we still have room to extend along this dimensions
+                return tuple(slices)
+
+            if dim > 0:
+                # reset to the start and continue iterating with higher dimension
+                self._chunk_index[dim] = 0
+            dim -= 1
+        return tuple(slices)
+
+
 # ----------------------------------------------------------------------------------
 def copy_element(val, src_dt, tgt_dt, ctx):
     msg = f"copy_element, val: {val} "
@@ -223,7 +401,7 @@ def copy_element(val, src_dt, tgt_dt, ctx):
             else:
                 out = ""  # h5pyd refs are strings
 
-            if ref and val: 
+            if ref and val:
                 try:
                     fin_obj = fin[val]
                 except AttributeError as ae:
@@ -236,7 +414,7 @@ def copy_element(val, src_dt, tgt_dt, ctx):
                 h5path = fin_obj.name
                 if not h5path:
                     msg = "No path found for ref object"
-                    logging.warn(msg)
+                    logging.warning(msg)
                     if ctx["verbose"]:
                         print(msg)
                 else:
@@ -246,7 +424,6 @@ def copy_element(val, src_dt, tgt_dt, ctx):
                     else:
                         # convert to string for JSON serialization
                         out = str(fout_obj.ref)
-
 
         elif is_regionreference(ref):
             out = "tbd"
@@ -295,7 +472,7 @@ def copy_array(src_arr, ctx):
 
     if has_reference(src_arr.dtype):
         # flatten array to simplify iteration
-        count = np.product(src_arr.shape)
+        count = int(np.prod(src_arr.shape))
         tgt_arr_flat = tgt_arr.reshape((count,))
         src_arr_flat = src_arr.reshape((count,))
         for i in range(count):
@@ -321,7 +498,7 @@ def copy_attribute(desobj, name, srcobj, ctx):
     tgtarr = None
     data = srcobj.attrs[name]
     src_dt = None
-    
+
     # check for non-numpy types that might get returned
     if is_regionreference(data):
         msg = "regionreference types not supported, "
@@ -353,7 +530,7 @@ def copy_attribute(desobj, name, srcobj, ctx):
         # convert to numpy type
         data = np.asarray(data)
         src_dt = data.dtype
-        
+
     if src_dt.kind == "S" and isinstance(data, bytes):
         # check that this is actually utf-encodable
         try:
@@ -377,7 +554,6 @@ def copy_attribute(desobj, name, srcobj, ctx):
     else:
         des_empty = h5pyd.Empty
 
-    
     if isinstance(data, src_empty):
         # create Empty object with tgt dtype
         tgt_dt = convert_dtype(src_dt, ctx)
@@ -395,6 +571,7 @@ def copy_attribute(desobj, name, srcobj, ctx):
         if not ctx["ignore_error"]:
             raise IOError(msg)
 
+
 # "safe" resize method where new extent can be <= existing extent
 def resize_dataset(dset, extent, axis=0):
     logging.debug(f"resize_dataset {dset} to {extent}")
@@ -404,22 +581,6 @@ def resize_dataset(dset, extent, axis=0):
         # raise this if it's not a case where the extent is already increased
         if dset.shape[axis] < extent:
             raise
-
-# ----------------------------------------------------------------------------------
-def get_chunk_layout(dset):
-    if is_h5py(dset):
-        msg = "get_chunk_layout called on hdf5 dataset"
-        logging.error(msg)
-        raise IOError(msg)
-    dset_json = dset.id.dcpl_json
-    if "layout" not in dset_json:
-        msg = f"expect to find layout key in dset_json: {dset_json}"
-        logging.error(msg)
-        raise IOError(msg)
-    layout = dset_json["layout"]
-    logging.debug(f"got chunk layout for dset id: {dset.id.id}: {layout}")
-    return layout
-    
 
 
 # ----------------------------------------------------------------------------------
@@ -446,6 +607,7 @@ def get_chunk_dims(dset):
         chunk_dims = None
     return chunk_dims
 
+
 # ----------------------------------------------------------------------------------
 def get_chunktable_dims(dset):
     rank = len(dset.shape)
@@ -462,6 +624,7 @@ def get_chunktable_dims(dset):
         table_dims.append(table_extent)
     table_dims = tuple(table_dims)
     return table_dims
+
 
 # ----------------------------------------------------------------------------------
 def get_num_chunks(dset):
@@ -493,6 +656,7 @@ def get_num_chunks(dset):
         num_chunks = 1
     return num_chunks
 
+
 # ----------------------------------------------------------------------------------
 def get_dset_offset(dset):
     """ Return dataset file offset for HDF5 contiguous datasets """
@@ -504,7 +668,8 @@ def get_dset_offset(dset):
     if offset is None:
         return -1
     return offset
-   
+
+
 # ----------------------------------------------------------------------------------
 def get_chunktable_dtype(include_file_uri=False):
     if include_file_uri:
@@ -514,6 +679,7 @@ def get_chunktable_dtype(include_file_uri=False):
         dt = np.dtype([("offset", np.int64), ("size", np.int32)])
     return dt
 
+
 # ----------------------------------------------------------------------------------
 def get_chunk_table_index(chunk_offset, chunk_dims):
     if len(chunk_offset) != len(chunk_dims):
@@ -522,8 +688,127 @@ def get_chunk_table_index(chunk_offset, chunk_dims):
     rank = len(chunk_offset)
     chunk_index = []
     for i in range(rank):
-        chunk_index.append(chunk_offset[i]//chunk_dims[i])
+        chunk_index.append(chunk_offset[i] // chunk_dims[i])
     return tuple(chunk_index)
+
+
+# ----------------------------------------------------------------------------------
+def get_chunk_locations(dset, ctx, include_file_uri=False):
+    if not is_h5py(dset):
+        msg = "get_chunklocations should only be used with HDF5 datasets"
+        logging.error(msg)
+        if ctx["ignore_error"]:
+            return None
+        else:
+            raise IOError(msg)
+
+    if dset.chunks is None:
+        msg = "get_chunklocations - dataset is not chunked"
+        logging.error(msg)
+        if ctx["ignore_error"]:
+            return None
+        else:
+            raise IOError(msg)
+
+    rank = len(dset.shape)
+
+    spaceid = dset.id.get_space()
+    logging.debug(f"using chunk_iter: {library_has_chunk_iter}")
+
+    dt = get_chunktable_dtype(include_file_uri=include_file_uri)
+
+    chunktable_dims = get_chunktable_dims(dset)
+    logging.debug(f"chunktable_dims: {chunktable_dims}")
+
+    if chunktable_dims is None:
+        msg = "no chunktable dimension returned"
+        logging.error(msg)
+        if ctx["ignore_error"]:
+            return None
+        else:
+            raise IOError(msg)
+
+    chunk_arr = np.zeros(chunktable_dims, dtype=dt)
+
+    if include_file_uri:
+        s3path = ctx["s3path"].encode("utf-8")
+    else:
+        s3path = None
+
+    if dset.chunks is None:
+        chunk_offset = get_dset_offset(dset)
+        if np.prod(chunktable_dims) != 1:
+            msg = "Expected one chunk"
+            logging.error(msg)
+            if not ctx["ignore_error"]:
+                raise IOError(msg)
+        if chunk_offset <= 0:
+            msg = "Expected dset_offset to be greater than zero"
+            logging.error(msg)
+            if not ctx["ignore_error"]:
+                raise IOError(msg)
+
+        chunk_size = dset.id.get_storage_size()
+        if include_file_uri:
+            e = (chunk_offset, chunk_size, s3path)
+        else:
+            e = (chunk_offset, chunk_size)
+
+        chunk_arr[...] = e
+
+        # return one-element array
+        return chunk_arr
+
+    # get chunk locations for non-contiguous datasets
+    chunk_dims = get_chunk_dims(dset)
+
+    if library_has_chunk_iter:
+        def init_chunktable_callback(chunk_info):
+            # Use chunk offset as index
+            index = get_chunk_table_index(chunk_info[0], chunk_dims)
+            byte_offset = chunk_info[2]
+            chunk_size = chunk_info[3]
+
+            if not isinstance(index, tuple) or len(index) != rank:
+                msg = f"Unexpected array_offset: {index} for dataset with rank: {rank}"
+                logging.error(msg)
+                raise IOError(msg)
+
+            if include_file_uri:
+                e = (byte_offset, chunk_size, s3path)
+            else:
+                e = (byte_offset, chunk_size)
+
+            chunk_arr[index] = e
+
+        dset.id.chunk_iter(init_chunktable_callback)
+    else:
+        # Using old HDF5 version without H5Dchunk_iter
+        num_chunks = get_num_chunks(dset)
+
+        for i in range(num_chunks):
+            chunk_info = dset.id.get_chunk_info(i, spaceid)
+            index = get_chunk_table_index(chunk_info[0], chunk_dims)
+            byte_offset = chunk_info[2]
+            chunk_size = chunk_info[3]
+            logging.debug(f"got chunk_info: {chunk_info} for chunk: {i}")
+            if not isinstance(index, tuple) or len(index) != rank:
+                msg = f"Unexpected array_offset: {index} for dataset with rank: {rank}"
+                logging.error(msg)
+                raise IOError(msg)
+
+            if include_file_uri:
+                e = (byte_offset, chunk_size, s3path)
+            else:
+                e = (byte_offset, chunk_size)
+
+            chunk_arr[index] = e
+
+            if i % 5000 == 0:
+                logging.info(f"{i} chunks indexed")
+
+    return chunk_arr
+
 
 # ----------------------------------------------------------------------------------
 def create_chunktable(dset, dset_dims, ctx):
@@ -546,7 +831,7 @@ def create_chunktable(dset, dset_dims, ctx):
         dt = get_chunktable_dtype(include_file_uri=include_file_uri)
 
         chunktable_dims = [0,] if extend else []
-        
+
         chunktable_dims.extend(get_chunktable_dims(dset))
         chunktable_dims = tuple(chunktable_dims)
         logging.debug(f"chunktable_dims: {chunktable_dims}")
@@ -556,7 +841,31 @@ def create_chunktable(dset, dset_dims, ctx):
         chunk_dims.extend(get_chunk_dims(dset))
 
         fout = ctx["fout"]
-        anon_dset = fout.create_dataset(None, shape=chunktable_dims, dtype=dt, maxshape=chunktable_maxshape)
+        kwargs = {}
+        kwargs["shape"] = chunktable_dims
+        kwargs["dtype"] = dt
+        kwargs["maxshape"] = chunktable_maxshape
+        if ctx["dataload"] == "fastlink" and dset.name:
+            kwargs["initializer"] = "chunklocator"
+            initializer_opts = []
+            initializer_opts.append(f"--h5path={dset.name}")
+            linkpath = ctx["s3path"]
+            s3prefix = "s3://"
+            if linkpath.startswith(s3prefix):
+                linkpath = linkpath[len(s3prefix):]
+            index = linkpath.find("/")
+            if index < 1:
+                msg = f"unexpected linkpath: {linkpath}"
+                logging.error(msg)
+                raise ValueError(msg)
+            bucket = linkpath[:index]
+            filepath = linkpath[(index + 1):]
+            initializer_opts.append(f"--filepath={filepath}")
+            initializer_opts.append(f"--bucket={bucket}")
+            logging.info(f"using initializer: {initializer_opts}")
+            kwargs["initializer_opts"] = initializer_opts
+
+        anon_dset = fout.create_dataset(None, **kwargs)
         msg = f"created chunk table: {anon_dset}"
         logging.info(msg)
         if ctx["verbose"]:
@@ -566,6 +875,7 @@ def create_chunktable(dset, dset_dims, ctx):
             chunks["file_uri"] = ctx["s3path"]
         chunks["dims"] = chunk_dims
         chunks["chunk_table"] = anon_dset.id.id
+
     elif num_chunks <= 1 and dset.chunks is None:
         # use contiguous mapping
         chunks["class"] = "H5D_CONTIGUOUS_REF"
@@ -587,71 +897,142 @@ def create_chunktable(dset, dset_dims, ctx):
         chunks["size"] = dset_size
     else:
         # construct map of chunks if count is less than 10
+        # get the chunk locations
         chunk_map = {}
-        if is_h5py(dset):
-            # for hdf5 use get_chunk_info function to get chunk location for each chunk
-            spaceid = dset.id.get_space()
-            chunk_dims = get_chunk_dims(dset)
-            for i in range(num_chunks):
-                chunk_info = dset.id.get_chunk_info(i, spaceid)
-                index = chunk_info.chunk_offset
-                logging.debug(f"got chunk_info: {chunk_info} for chunk: {i}")
-                if not isinstance(index, tuple) or len(index) != rank:
-                    msg = f"Unexpected array_offset: {index} for dataset with rank: {rank}"
-                    logging.error(msg)
-                    if not ctx["ignore_error"]:
-                        raise IOError(msg)
-                chunk_key = ""
-                for dim in range(rank):
-                    chunk_key += str(index[dim] // chunk_dims[dim])
-                    if dim < rank - 1:
-                        chunk_key += "_"
-                logging.debug(f"adding chunk_key: {chunk_key}")
-                chunk_map[chunk_key] = (chunk_info.byte_offset, chunk_info.size)
-                if i % 5000 == 0:
-                    logging.info(f"{i} chunks indexed")
-        else:
-            msg = f"expected {dset} to be a h5py object"
-            logging.error(msg)
-            if not ctx["ignore_error"]:
-                raise IOError(msg)
+        chunk_dims = get_chunk_dims(dset)
+        spaceid = dset.id.get_space()
 
+        for i in range(num_chunks):
+            chunk_info = dset.id.get_chunk_info(i, spaceid)
+            index = chunk_info.chunk_offset
+            logging.debug(f"got chunk_info: {chunk_info} for chunk: {i}")
+            if not isinstance(index, tuple) or len(index) != rank:
+                msg = f"Unexpected array_offset: {index} for dataset with rank: {rank}"
+                logging.error(msg)
+                if ctx["ignore_error"]:
+                    continue
+                else:
+                    raise IOError(msg)
+
+            chunk_key = ""
+            for dim in range(rank):
+                chunk_key += str(index[dim] // chunk_dims[dim])
+                if dim < rank - 1:
+                    chunk_key += "_"
+            logging.debug(f"adding chunk_key: {chunk_key}")
+            chunk_map[chunk_key] = (chunk_info.byte_offset, chunk_info.size)
 
         chunks["class"] = "H5D_CHUNKED_REF"
         if not extend:
             chunks["file_uri"] = ctx["s3path"]
         chunks["dims"] = dset.chunks
         chunks["chunks"] = chunk_map
+
+    logging.info(f"using chunk layout: {chunks}")
+    return chunks
+
+
+# ----------------------------------------------------------------------------------
+def create_h5image_chunktable(num_bytes, s3path, dataload, fout):
+    logging.debug(f"create_h5image_chunktable({num_bytes}, {s3path}")
+    CHUNK_SIZE = 2 * 1024 * 1024  # 2MB
+    chunks = {}
+    num_chunks = -(num_bytes // -CHUNK_SIZE)  # ceil
+    if dataload in ("link", "fastlink") and s3path:
+        chunks = {"file_uri": s3path}
+
+        if num_chunks <= 0:
+            msg = "unexpected error in setting chunks for h5image"
+            logging.error(msg)
+            raise ValueError(msg)
+        elif num_chunks == 1:
+            chunks["class"] = "H5D_CONTIGUOUS_REF"
+            chunks["offset"] = 0
+            chunks["size"] = num_bytes
+            logging.debug(f"using chunk layout for link option: {chunks}")
+        elif num_chunks <= 100:
+            # 2MB - 200 MB
+            chunks["class"] = "H5D_CHUNKED_REF"
+            chunks["dims"] = [CHUNK_SIZE,]
+            # set the chunk locations
+            chunk_map = {}
+            chunks["dims"] = [CHUNK_SIZE,]
+            offset = 0
+
+            for i in range(num_chunks):
+                if offset + CHUNK_SIZE > num_bytes:
+                    chunk_size = (offset + CHUNK_SIZE) - num_bytes
+                else:
+                    chunk_size = CHUNK_SIZE
+                chunk_map[str(i)] = (offset, chunk_size)
+                offset += chunk_size
+
+            chunks["chunks"] = chunk_map
+        else:
+            # num_chunks > 100
+            # create anonymous dataset to hold chunk info
+            chunks["class"] = "H5D_CHUNKED_REF_INDIRECT"
+            chunks["dims"] = [CHUNK_SIZE,]
+            dt = get_chunktable_dtype()
+
+            chunktable_dims = [num_chunks,]
+            anon_dset = fout.create_dataset(None, chunktable_dims, dtype=dt)
+            msg = f"created chunk table: {anon_dset}"
+            logging.info(msg)
+            chunks["chunk_table"] = anon_dset.id.id
+    else:
+        # non-linked case
+        chunks["class"] = "H5D_CHUNKED"
+        if num_chunks <= 1:
+            chunk_shape = [num_bytes,]
+        else:
+            chunk_shape = [CHUNK_SIZE,]
+        chunks["dims"] = chunk_shape
+
     logging.info(f"using chunk layout: {chunks}")
     return chunks
 
 
 # ----------------------------------------------------------------------------------
 def update_chunktable(src, tgt, ctx):
-    layout = tgt.id.layout
-    if not layout:
+    tgt_layout = get_chunk_layout(tgt)
+
+    if not tgt_layout:
         raise IOError("expected dataset layout to be set")
-    if layout["class"] != "H5D_CHUNKED_REF_INDIRECT":
+    tgt_layout_class = tgt_layout.get("class")
+    if tgt_layout_class != "H5D_CHUNKED_REF_INDIRECT":
         logging.info("update_chunktable not supported for this chunk class")
         return
+    if ctx["dataload"] == "fastlink":
+        logging.info("skip update_chunktable for fastload")
+        return
     rank = len(tgt.shape)
-    chunktable_id = layout["chunk_table"]
+    chunktable_id = tgt_layout["chunk_table"]
 
     fout = ctx["fout"]
+    logging.info(f"update_chunk_table {src.name}, id: {src.id.id}")
+
+    # create a numpy array containing chunk refs for each chunk in src array
+    extend = True if rank > len(src.shape) else False
+    if extend and not ctx["s3path"]:
+        msg = "expected s3path to be set for extend mode"
+        logging.error(msg)
+        if not ctx["ignore_error"]:
+            raise IOError(msg)
+        return
 
     chunktable = fout[f"datasets/{chunktable_id}"]
-    chunk_dims = get_chunk_dims(src)
-    chunktable_dims = get_chunktable_dims(src)
+    chunk_arr = get_chunk_locations(src, ctx, include_file_uri=extend)
 
-    msg = f"dataset chunk dimensions {chunktable_dims} not compatible with {chunktable.shape}"
-    if len(chunktable_dims) == len(chunktable.shape):
-        if chunktable_dims != chunktable.shape:
+    msg = f"dataset chunk dimensions {chunktable.shape} not compatible with {chunk_arr.shape}"
+    if len(chunktable.shape) == len(chunk_arr.shape):
+        if chunktable.shape != chunk_arr.shape:
             logging.error(msg)
             if not ctx["ignore_error"]:
                 raise IOError(msg)
             return
-    elif len(chunktable_dims) + 1 == len(chunktable.shape):
-        if chunktable_dims != chunktable.shape[1:]:
+    elif len(chunk_arr.shape) + 1 == len(chunktable.shape):
+        if chunk_arr.shape != chunktable.shape[1:]:
             logging.error(msg)
             return
     else:
@@ -660,84 +1041,38 @@ def update_chunktable(src, tgt, ctx):
             raise IOError(msg)
         return
 
-    # create a numpy array containing chunk refs for each chunk in src array
-    extend = True if rank > len(src.shape) else False
-    if extend and not ctx["s3path"]:
-        logging.error("expected s3path to be set for extend mode")
-        if not ctx["ignore_error"]:
-            raise IOError(msg)
-        return
-    # prior to HSDS v0.7.0+, reads failed if str was used for s3path,
-    # store as bytes
-    s3path = ctx["s3path"].encode("utf-8")
-    dt = get_chunktable_dtype(include_file_uri=extend)
-    chunkinfo_arr = np.zeros(chunktable_dims, dtype=dt)
-    rank = len(chunktable_dims)
-    num_chunks = get_num_chunks(src)
-   
-    if is_h5py(src):   
-        if src.chunks is None:
-            chunk_offset = get_dset_offset(src)
-            if chunk_offset <= 0:
-                msg = "Expected dset_offset to be greater than zero"
-                logging.error(msg)
-                if not ctx["ignore_error"]:
-                    raise IOError(msg)
-                return
-
-            chunk_size = src.id.get_storage_size()
-            if extend:
-                chunkinfo_arr[...] = (chunk_offset, chunk_size, s3path)
-            else:
-                chunkinfo_arr[...] = (chunk_offset, chunk_size)
-        else:
-            spaceid = src.id.get_space()
-    
-            for i in range(num_chunks):
-                chunk_info = src.id.get_chunk_info(i, spaceid)
-                index = get_chunk_table_index(chunk_info.chunk_offset, chunk_dims)
-                if not isinstance(index, tuple) or len(index) != rank:
-                    msg = f"Unexpected array_offset: {index} for dataset with rank: {rank}"
-                    logging.error(msg)
-                    if not ctx["ignore_error"]:
-                        raise IOError(msg)
-                    return
-                e = [chunk_info.byte_offset, chunk_info.size]
-                if extend:
-                    e.append(s3path)
-                e = tuple(e)
-                chunkinfo_arr[index] = e
-    else:
+    if not is_h5py(src):
+        # hsds dataset
         if not extend:
             msg = "unexpected src type for update_chunktable"
             logging.error(msg)
             if not ctx["ignore_error"]:
                 raise IOError(msg)
             return
-    
-        layout = get_chunk_layout(src)
-        layout_class = layout["class"]
-        if layout_class == "H5D_CONTIGUOUS_REF":
-            chunk_offset = layout["offset"]
-            chunk_size = layout["size"]
-            file_uri = layout["file_uri"]
-            chunkinfo_arr[...] = (chunk_offset, chunk_size, file_uri)
-        elif layout_class == "H5D_CHUNKED_REF":
-            file_uri = layout["file_uri"]
-            chunkmap = layout["chunks"]  # e.g.{'0_2': [4016, 2000000]}}
+
+        src_layout = get_chunk_layout(src)
+        src_layout_class = src_layout["class"]
+        if src_layout_class == "H5D_CONTIGUOUS_REF":
+            chunk_offset = src_layout["offset"]
+            chunk_size = src_layout["size"]
+            file_uri = src_layout["file_uri"]
+            chunk_arr = [(chunk_offset, chunk_size, file_uri),]
+        elif src_layout_class == "H5D_CHUNKED_REF":
+            file_uri = src_layout["file_uri"]
+            chunkmap = src_layout["chunks"]  # e.g.{'0_2': [4016, 2000000]}}
             for k in chunkmap:
                 v = chunkmap[k]
-                v.append(s3path)
+                v.append(file_uri)
                 v = tuple(v)
                 index = []
                 chunk_indices = k.split("_")
                 for i in range(len(chunk_indices)):
                     index.append(int(chunk_indices[i]))
                 index = tuple(index)
-                chunkinfo_arr[index] = v
-        elif layout_class == "H5D_CHUNKED_REF_INDIRECT":
-            file_uri = layout["file_uri"] 
-            orig_chunktable_id = layout["chunk_table"]
+                chunk_arr[index] = v
+        elif src_layout_class == "H5D_CHUNKED_REF_INDIRECT":
+            file_uri = src_layout["file_uri"]
+            orig_chunktable_id = src_layout["chunk_table"]
             orig_chunktable = fout[f"datasets/{orig_chunktable_id}"]
             # iterate through contents and add file uri
             arr = orig_chunktable[...]
@@ -753,21 +1088,70 @@ def update_chunktable(src, tgt, ctx):
                 tgt_index = [0,]
                 tgt_index.extend(it.multi_index)
                 tgt_index = tuple(tgt_index)
-                chunkinfo_arr[it.multi_index] = e
+                chunk_arr[it.multi_index] = e
         else:
-            msg = f"expected chunk ref class but got: {layout_class}"
+            msg = f"expected chunk ref class but got: {src_layout_class}"
             logging.error(msg)
             if not ctx["ignore_error"]:
                 raise IOError(msg)
             return
-            
+
     if len(tgt.shape) > len(src.shape):
         # append mode, extend the first dimension of table by one
         extent = chunktable.shape[0] + 1
         resize_dataset(chunktable, extent)
-        chunktable[extent - 1, ...] = chunkinfo_arr
+        chunktable[extent - 1, ...] = chunk_arr
     else:
-        chunktable[...] = chunkinfo_arr
+        chunktable[...] = chunk_arr
+
+
+# ----------------------------------------------------------------------------------
+def expandChunk(chunk_shape, max_shape, typesize):
+    """Extend the chunk shape until it is above the MIN target."""
+
+    if chunk_shape is None:
+        return None
+
+    logging.debug(f"orig chunk_shape: {chunk_shape}")
+
+    rank = len(chunk_shape)
+
+    if rank != len(max_shape):
+        raise ValueError("non-compatible arguments to expandChunk")
+
+    if rank == 0:
+        # scalar - can't be expanded
+        return tuple(chunk_shape)
+
+    chunk_shape = list(chunk_shape).copy()
+
+    while True:
+        chunk_size = np.prod(chunk_shape).item() * typesize
+        if chunk_size >= MIN_CHUNK_SIZE:
+            # this shape works
+            break
+        if chunk_size == 0:
+            # can't do anything with zero-size chunks
+            break
+
+        extended = False
+
+        for i in range(rank):
+            # start from the low-order dimension
+            dim = rank - i - 1
+            nextent = chunk_shape[dim]
+            if nextent * 2 <= max_shape[dim]:
+                chunk_shape[dim] = nextent * 2
+                extended = True
+                break
+
+        if not extended:
+            # unable to increase chunk_shape further
+            break
+
+    logging.debug(f"expandChunk - returning {chunk_shape}")
+
+    return tuple(chunk_shape)
 
 
 # ----------------------------------------------------------------------------------
@@ -805,7 +1189,7 @@ def create_dataset(dobj, ctx):
                 if len(dset.shape) == len(dobj.shape):
                     if dset.shape != dobj.shape:
                         msg = f"unable to append {dobj.name}: shape is not compatible"
-                        logging.error(msg)    
+                        logging.error(msg)
                         if ctx["verbose"]:
                             print(msg)
                         return None
@@ -898,23 +1282,25 @@ def create_dataset(dobj, ctx):
 
         kwargs = {"shape": tgt_shape, "maxshape": tgt_maxshape, "dtype": tgt_dtype}
 
-        if (
-            ctx["dataload"] == "link"
-            and not is_vlen(dobj.dtype)
-            and dobj.shape is not None
-            and len(dobj.shape) > 0
-            and not is_compact(dobj)
-            and np.prod(dobj.shape) > MIN_DSET_ELEMENTS_FOR_LINKING
-        ):
+        if (ctx["dataload"] in ("link", "fastlink") and (
+            not is_vlen(dobj.dtype)) and (
+            dobj.shape is not None) and (
+            len(dobj.shape) > 0) and (
+            not is_compact(dobj)) and (
+                np.prod(dobj.shape) > MIN_DSET_ELEMENTS_FOR_LINKING)):
+
             chunks = create_chunktable(dobj, tgt_shape, ctx)
-            logging.info(f"using chunk layout: {chunks}")
+            logging.debug(f"using chunk layout for link option: {chunks}")
 
         # use the source object layout if we are not using reference mapping
         if chunks is None and dobj.shape is not None and len(dobj.shape) > 0:
             # converting hsds dset with linked chunks to h5py dataset
             # just use the dims field of dobj.chunks as chunk shape
             chunks = get_chunk_dims(dobj)
-        if chunks is not None:
+
+        if chunks is not None and not is_h5py(fout):
+            # expand chunk if too small
+
             if dset_preappend is not None:
                 # check to see if an extra dimension is needed for the chunk shape
                 if isinstance(chunks, dict):
@@ -924,17 +1310,46 @@ def create_dataset(dobj, ctx):
                     new_chunks = [1,]
                     new_chunks.extend(chunks)
                     chunks = tuple(new_chunks)
+                    logging.debug("extend chunks for preappend:", chunks)
+            else:
+                if isinstance(chunks, dict):
+                    if "dims" in chunks:
+                        chunk_dims = chunks["dims"]
+                        layout_class = chunks.get("class")
+                        server_version = fout.serverver
+                        if server_version and server_version.startswith("0.9"):
+
+                            if layout_class == "H5D_CHUNKED_REF_INDIRECT":
+                                logging.debug("expand chunks for hyperchunksing")
+                                # currently hyperchunks only supported for 1d datasets
+                                logging.debug(f"hdf5 chunk dims: {chunk_dims}")
+                                chunks["hyper_dims"] = chunk_dims
+                                chunk_dims = expandChunk(chunk_dims, dobj.shape, dobj.dtype.itemsize)
+                                logging.debug(f"expanded chunks: {chunk_dims}")
+                                logging.debug(f"expanded chunks: {chunk_dims}")
+                                chunks["dims"] = chunk_dims
+                                logging.debug(f"updating for hyper_dims: {chunks}")
+                    else:
+                        # contiguous or compact, using dataset shape
+                        pass
+                else:
+                    # just a list with chunk shape
+                    if len(chunks) == 1:
+                        # currently hyperchunks only supported for 1d datasets
+                        chunks = expandChunk(chunks, dobj.shape, dobj.dtype.itemsize)
+                        logging.debug(f"expanded chunks: {chunks}")
+
+            logging.debug(f"setting chunks kwargs to: {chunks}")
+
             kwargs["chunks"] = chunks
 
-        if (
-            dobj.shape is None
-            or len(dobj.shape) == 0
-            or (is_vlen(dobj.dtype) and is_h5py(fout))
-        ):
+        if (dobj.shape is None or (len(dobj.shape) == 0) or (
+                is_vlen(dobj.dtype) and is_h5py(fout))):
             # don't use compression/chunks for scalar datasets
             # or vlen
             pass
         else:
+            logging.debug(f"filter setup for {dobj.name}")
             if not ctx["ignorefilters"]:
                 kwargs["compression"] = dobj.compression
                 kwargs["compression_opts"] = dobj.compression_opts
@@ -945,10 +1360,10 @@ def create_dataset(dobj, ctx):
                 kwargs["compression_opts"] = ctx["default_compression_opts"]
                 if ctx["verbose"]:
                     print("applying default compression filter")
-                
+
             # TBD: it would be better if HSDS could let us know what filters
             # are supported (like it does with compressors)
-            # For now, just hard-code fletcher32 and scaleoffset to be ignored
+            # For now, just hard-ccreate_datasetcreate_datasetode fletcher32 and scaleoffset to be ignored
             if dobj.fletcher32:
                 msg = f"fletcher32 filter used by dataset: {dobj.name} is not "
                 msg += "supported by HSDS, this filter will not be used"
@@ -958,7 +1373,39 @@ def create_dataset(dobj, ctx):
                 msg = f"scaleoffset filter used by dataset: {dobj.name} is not "
                 msg += "supported by HSDS, this filter will not be used"
                 logging.warning(msg)
-                # kwargs["scaleoffset"] = dobj.scaleoffset
+
+            if is_h5py(dobj) and not kwargs.get("compression"):
+                # apply any custom filters as long as they are supported in HSDS
+                for filter_id in dobj._filters:
+                    filter_opts = dobj._filters[filter_id]
+                    try:
+                        filter_id = int(filter_id)
+                    except ValueError:
+                        msg = "unrecognized filter id: {filter_id} for {dobj.name}, ignoring"
+                        logging.warning(msg)
+
+                    if not isinstance(filter_id, int):
+                        continue
+
+                    if filter_id in H5Z_FILTER_MAP:
+                        filter_name = H5Z_FILTER_MAP[filter_id]
+                        if filter_name == "bitshuffle":
+                            kwargs["shuffle"] = filter_name
+                            logging.info(f"using bitshuffle on {dobj.name}")
+                        else:
+                            # supported non-standard compressor
+                            kwargs["compression"] = filter_name
+                            logging.info(f"using compressor: {filter_name} for {dobj.name}")
+                            if isinstance(filter_opts, int) or isinstance(filter_opts, dict):
+                                kwargs["compression_opts"] = filter_opts
+                                logging.info(f"compression_opts: {filter_opts}")
+                            else:
+                                msg = f"ignoring compression_opts for filter: {filter_name}"
+                                logging.warning(msg)
+                    else:
+                        logging.warning(f"filter id {filter_id} for {dobj.name} not supported")
+
+        # kwargs["scaleoffset"] = dobj.scaleoffset
         # setting the fillvalue is failing in some cases
         # see: https://github.com/HDFGroup/h5pyd/issues/119
         # don't set fill value for reference types
@@ -967,11 +1414,11 @@ def create_dataset(dobj, ctx):
             logging.debug(f"got fillvalue: {fillvalue}")
             kwargs["fillvalue"] = fillvalue
 
-        # finally, create the dataset  
+        # finally, create the dataset
         msg = f"creating dataset {dobj.name}, shape: {dobj.shape}, type: {tgt_dtype}"
         logging.info(msg)
         if ctx["verbose"]:
-            print(msg) 
+            print(msg)
         dset = fout.create_dataset(dobj.name, **kwargs)
 
         msg = f"dataset created, uuid: {dset.id.id}, "
@@ -988,12 +1435,12 @@ def create_dataset(dobj, ctx):
         logging.error(msg)
         if not ctx["ignore_error"]:
             raise
-        
 
     if dset_preappend is not None:
         write_dataset(dset_preappend, dset, ctx)
         # dset[0, ...] = dset_preappend[...]
     return dset
+
 
 # ----------------------------------------------------------------------------------
 def write_dataset(src, tgt, ctx):
@@ -1079,14 +1526,13 @@ def write_dataset(src, tgt, ctx):
             print(msg)
         resize_dataset(tgt, new_extent, axis=0)
 
-
-    if not is_h5py(tgt) and tgt.id.layout["class"] != "H5D_CHUNKED":
+    if not is_h5py(tgt) and get_chunk_layout_class(tgt) != "H5D_CHUNKED":
         # this is one of the ref layouts
-        if tgt.id.layout["class"] == "H5D_CHUNKED_REF_INDIRECT":
+        if get_chunk_layout_class(tgt) == "H5D_CHUNKED_REF_INDIRECT":
             # don't write chunks, but update chunktable for chunk ref indirect
             update_chunktable(src, tgt, ctx)
         else:
-            pass # skip chunkterator for link option
+            pass  # skip chunkterator for link option
         return
 
     msg = f"iterating over chunks for {src.name}"
@@ -1094,25 +1540,11 @@ def write_dataset(src, tgt, ctx):
     if ctx["verbose"]:
         print(msg)
     try:
-        if src.chunks is None:
-            # contiguous dataset, fake an iterator by creating a list
-            # with one slice
-            slices = []
-            for dim in range(rank):
-                extent = src.shape[dim]
-                s = slice(0, extent, 1)
-                slices.append(s)
-            slices = tuple(slices)
-            if rank == 1:
-                it = [slices[0],]
-            else:
-                it = [slices,]
-        else:
-            it = src.iter_chunks()
-
         logging.debug(f"src dtype: {src.dtype}")
         logging.debug(f"des dtype: {tgt.dtype}")
 
+        empty_arr = None
+        it = ChunkIterator(src)
         for src_s in it:
             logging.debug(f"src selection: {src_s}")
             if rank == 1 and isinstance(src_s, slice):
@@ -1141,10 +1573,20 @@ def write_dataset(src, tgt, ctx):
 
             arr = src[src_s]
             # don't write arr if it's all zeros (or the fillvalue if defined)
-            empty_arr = np.zeros(arr.shape, dtype=arr.dtype)
+            if empty_arr is None or empty_arr.shape != arr.shape:
+                empty_arr = np.zeros(arr.shape, dtype=arr.dtype)
             if fillvalue:
                 empty_arr.fill(fillvalue)
-            if np.array_equal(arr, empty_arr):
+
+            try:
+                is_equal = np.array_equal(arr, empty_arr)
+            except ValueError as ve:
+                msg = "ValueError on np.array_equal check - assuming not equal"
+                logging.warning(f"{msg}: {ve}")
+                if ctx["verbose"]:
+                    print(msg)
+                is_equal = False
+            if is_equal:
                 msg = f"skipping chunk for slice: {src_s}"
             else:
                 msg = f"writing dataset data for slice: {src_s}"
@@ -1202,7 +1644,7 @@ def create_links(gsrc, gdes, ctx):
                     # can return different id's.  This will cause HDF5 files with
                     # multilinks to not load correctly
                     msg = f"could not find map item to src id: {src_obj_id_hash}"
-                    logging.warn(msg)
+                    logging.warning(msg)
                     if ctx["verbose"]:
                         print("WARNING: " + msg)
         elif link_classname == "SoftLink":
@@ -1254,7 +1696,7 @@ def create_group(gobj, ctx):
             if ctx["verbose"]:
                 print(msg)
             return
-        
+
         if ctx["append"]:
             msg = f"skipping creation of group {gobj.name} since already found"
             logging.info(msg)
@@ -1295,7 +1737,52 @@ def create_datatype(obj, ctx):
     srcid_desobj_map[obj.id.__hash__()] = fout[obj.name]
 
 
-# create_datatype
+def get_filesize(f):
+    f.seek(0, 2)  # seek to end of file
+    num_bytes = f.tell()
+    f.seek(0)  # reset synch pointer
+    return num_bytes
+
+
+def load_h5image(
+        fin,
+        fout,
+        verbose=False,
+        dataload="ingest",
+        s3path=None
+):
+    num_bytes = get_filesize(fin)
+    msg = f"input file: {num_bytes} bytes"
+    logging.info(msg)
+    if verbose:
+        print(msg)
+
+    chunks = create_h5image_chunktable(num_bytes, s3path, dataload, fout)
+
+    dset = fout.create_dataset("h5image", (num_bytes,), chunks=chunks, dtype=np.uint8)
+    if dataload == "ingest":
+        # copy the file data by pages
+        page_size = dset.chunks[0]
+        if verbose:
+            print(f"page size: {page_size}")
+        offset = 0
+        while True:
+            data = fin.read(page_size)
+            if len(data) == 0:
+                break
+            arr = np.frombuffer(data, dtype=dset.dtype)
+            dset[offset:(offset + len(data))] = arr
+            offset += len(data)
+            msg = f"wrote {len(data)} bytes"
+            logging.info(msg)
+            if verbose:
+                print(msg)
+
+    msg = "load h5imag done"
+    logging.info(msg)
+    if verbose:
+        print(msg)
+
 
 # ---------------------------------------------------------------------------------
 def load_file(
@@ -1316,14 +1803,15 @@ def load_file(
 
     logging.info(f"input file: {fin.filename}")
     logging.info(f"output file: {fout.filename}")
+    logging.info(f"dataload: {dataload}")
     if dataload != "ingest":
         if not dataload:
             logging.info("no data load")
-        elif dataload == "link":
+        elif dataload in ("link", "fastlink"):
             if not s3path:
                 logging.error("s3path expected to be set")
                 sys.exit(1)
-            logging.info("using s3path")
+            logging.info(f"using s3path: {s3path}")
         else:
             logging.error(f"unexpected dataload value: {dataload}")
             sys.exit(1)

@@ -53,14 +53,16 @@ SO_INT_MINBITS_DEFAULT = 0
 def generate_dcpl(
     shape,
     dtype,
-    chunks,
-    compression,
-    compression_opts,
-    shuffle,
-    fletcher32,
-    maxshape,
-    scaleoffset,
-    layout,
+    chunks=None,
+    compression=None,
+    compression_opts=None,
+    shuffle=None,
+    fletcher32=None,
+    maxshape=None,
+    scaleoffset=None,
+    layout=None,
+    initializer=None,
+    initializer_opts=None
 ):
     """Generate a dataset creation property list.
 
@@ -134,10 +136,9 @@ def generate_dcpl(
             )
     # End argument validation
 
+    has_filter = any((shuffle, fletcher32, compression, maxshape, scaleoffset is not None))
     if (chunks is True) or (
-        chunks is None
-        and layout is not None
-        and any((shuffle, fletcher32, compression, maxshape, scaleoffset is not None))
+        chunks is None and layout is not None and has_filter
     ):
         chunks = guess_chunk(shape, maxshape, dtype.itemsize)
 
@@ -175,8 +176,23 @@ def generate_dcpl(
         filters.append(filter_scaleoffset)
 
     if shuffle:
-        filter_shuffle = {"class": "H5Z_FILTER_SHUFFLE"}
-        filter_shuffle["id"] = 2
+        if isinstance(shuffle, int) and shuffle == 32008:
+            bitshuffle = True
+        elif isinstance(shuffle, str) and shuffle == "bitshuffle":
+            bitshuffle = True
+        else:
+            bitshuffle = False
+
+        if bitshuffle:
+            filter_shuffle = {"class": "H5Z_FILTER_BITSHUFFLE"}
+            filter_shuffle["id"] = 32008
+            filter_shuffle["name"] = "bitshuffle"
+
+        else:
+            # regular shuffle filter
+            filter_shuffle = {"class": "H5Z_FILTER_SHUFFLE"}
+            filter_shuffle["id"] = 2
+            filter_shuffle["name"] = "shuffle"
         filters.append(filter_shuffle)
 
     if compression == "gzip":
@@ -239,19 +255,23 @@ def generate_dcpl(
                 for k in compression_opts:
                     filter[k] = compression_opts[k]
             else:
-                if compression_opts in range(10):
-                    level = compression_opts
-                else:
-                    raise ValueError(
-                        "compression setting must be a dict or integer from 0-9, not {}".format(
-                            compression_opts
-                        )
-                    )
+                if compression_opts not in range(10):
+                    msg = "compression setting must be a dict or integer from 0-9, "
+                    msg += f"not {compression_opts}"
+                    raise ValueError(msg)
+                level = compression_opts
                 filter["level"] = level
         filters.append(filter)
 
     if len(filters) > 0:
         plist["filters"] = filters
+
+    if initializer:
+        # pass in initializer options
+        initializer = [initializer,]
+        if initializer_opts:
+            initializer.extend(initializer_opts)
+        plist["initializer"] = initializer
 
     return plist
 
@@ -296,7 +316,7 @@ def guess_chunk(shape, maxshape, typesize):
 
     # Determine the optimal chunk size in bytes using a PyTables expression.
     # This is kept as a float.
-    dset_size = np.product(chunks) * typesize
+    dset_size = np.prod(chunks) * typesize
     target_size = CHUNK_BASE * (2 ** np.log10(dset_size / (1024.0 * 1024)))
 
     if target_size > CHUNK_MAX:
@@ -311,15 +331,14 @@ def guess_chunk(shape, maxshape, typesize):
         # 1b. We're within 50% of the target chunk size, AND
         #  2. The chunk is smaller than the maximum chunk size
 
-        chunk_bytes = np.product(chunks) * typesize
+        chunk_bytes = np.prod(chunks) * typesize
 
         if (
-            chunk_bytes < target_size
-            or abs(chunk_bytes - target_size) / target_size < 0.5
+            chunk_bytes < target_size or abs(chunk_bytes - target_size) / target_size < 0.5
         ) and chunk_bytes < CHUNK_MAX:
             break
 
-        if np.product(chunks) == 1:
+        if np.prod(chunks) == 1:
             break  # Element size larger than CHUNK_MAX
 
         chunks[idx % ndims] = np.ceil(chunks[idx % ndims] / 2.0)

@@ -12,45 +12,49 @@
 
 from __future__ import absolute_import
 
-from distutils.version import StrictVersion as _sv
+from packaging.version import parse
 import sys
 import numpy
 
-version = "0.13.0"
+version = "0.24.0"
 
 hdf5_version = "REST"
 
-_exp = _sv(version)
+_pversion = parse(version)
 
-version_tuple = _exp.version + (
-    ("".join(str(x) for x in _exp.prerelease),)
-    if _exp.prerelease is not None
-    else ("",)
-)
+_suffix = ""
+if _pversion.pre is not None:
+    _suffix += "".join(str(x) for x in _pversion.pre)
+if _pversion.post is not None:
+    if _suffix:
+        _suffix += "."
+    _suffix += f"post{_pversion.post}"
+if _pversion.dev is not None:
+    if _suffix:
+        _suffix += "."
+    _suffix += f"dev{_pversion.dev}"
+if _pversion.local is not None:
+    if _suffix:
+        _suffix += "+"
+    _suffix += str(_pversion.local)
 
-api_version_tuple = (0, 13, 0)
-api_version = "0.13.0"
+version_tuple = (_pversion.major, _pversion.minor, _pversion.micro, _suffix)
 
-__doc__ = """\
-This is h5pyd **%s**
+api_version_tuple = (0, 24, 0)
+api_version = "0.24.0"
 
-""" % (
-    version
-)
+__doc__ = f"""\
+This is h5pyd **{version}**
 
-info = """\
+"""
+
+info = f"""\
 Summary of the h5pyd configuration
 ---------------------------------
 
-h5pyd    %(h5pyd)s
-Python  %(python)s
-sys.platform    %(platform)s
-sys.maxsize     %(maxsize)s
-numpy   %(numpy)s
-""" % {
-    "h5pyd": version,
-    "python": sys.version,
-    "platform": sys.platform,
-    "maxsize": sys.maxsize,
-    "numpy": numpy.__version__,
-}
+h5pyd    {version}
+Python  {sys.version}
+sys.platform    {sys.platform}
+sys.maxsize     {sys.maxsize}
+numpy   {numpy.__version__}
+"""

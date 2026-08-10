@@ -18,7 +18,13 @@ if __name__ == "__main__":
 else:
     from .config import Config
 
+
+def eprint(*args, **kwargs):
+    print(*args, file=sys.stderr, **kwargs)
+
+
 cfg = Config()
+
 
 #
 # log error and abort app
@@ -31,12 +37,13 @@ def abort(msg):
     logging.error("exiting program with return code -1")
     sys.exit(-1)
 
+
 #
 # get given ACL, return None if not found
 #
 def getACL(f, username="default"):
     try:
-       acl = f.getACL(username)
+        acl = f.getACL(username)
     except IOError as ioe:
         if ioe.errno == 403:
             print("No permission to read ACL for this domain")
@@ -47,12 +54,13 @@ def getACL(f, username="default"):
         elif ioe.errno == 404 or not ioe.errno:
             return None
         else:
-            print("unexpected error: {}".format(ioe))
+            eprint(f"unexpected error: {ioe}")
             sys.exit(1)
     if acl and "domain" in acl:
         # remove the domain key
         del acl["domain"]
     return acl
+
 
 #
 # Usage
@@ -71,7 +79,7 @@ def usage():
     for name in option_names:
         help_msg = cfg.get_help_message(name)
         if help_msg:
-            print(f"    {help_msg}")  
+            print(f"    {help_msg}")
     print("")
 
     print("Arguments:")
@@ -95,9 +103,8 @@ def usage():
     sys.exit()
 
 
-
 def main():
-    perm_abvr = {'c':'create', 'r': 'read', 'u': 'update', 'd': 'delete', 'e': 'readACL', 'p':'updateACL'}
+    perm_abvr = {'c': 'create', 'r': 'read', 'u': 'update', 'd': 'delete', 'e': 'readACL', 'p': 'updateACL'}
     fields = ('username', 'create', 'read', 'update', 'delete', 'readACL', 'updateACL')
     domain = None
     perm = None
@@ -108,13 +115,12 @@ def main():
     # additional options
     cfg.setitem("help", False, flags=["-h", "--help"], help="this message")
 
-    
     try:
         cmdline_args = cfg.set_cmd_flags(sys.argv[1:], allow_post_flags=True)
     except ValueError as ve:
         print(ve)
         usage()
-    
+
     if len(cmdline_args) == 0:
         # need a domain
         usage()
@@ -176,9 +182,11 @@ def main():
     # open the domain or folder
     try:
         if domain[-1] == '/':
-            f = h5pyd.Folder(domain, mode=mode, endpoint=cfg["hs_endpoint"], username=cfg["hs_username"], password=cfg["hs_password"], bucket=cfg["hs_bucket"])
+            f = h5pyd.Folder(domain, mode=mode, endpoint=cfg["hs_endpoint"],
+                             username=cfg["hs_username"], password=cfg["hs_password"], bucket=cfg["hs_bucket"])
         else:
-            f = h5pyd.File(domain, mode=mode, endpoint=cfg["hs_endpoint"], username=cfg["hs_username"], password=cfg["hs_password"], bucket=cfg["hs_bucket"])
+            f = h5pyd.File(domain, mode=mode, endpoint=cfg["hs_endpoint"],
+                           username=cfg["hs_username"], password=cfg["hs_password"], bucket=cfg["hs_bucket"])
     except IOError as ioe:
         if ioe.errno in (404, 410):
             abort("domain not found")
@@ -239,9 +247,10 @@ def main():
             else:
                 abort(f"Unexpected error: {ioe}")
         print("%015s   %08s  %08s  %08s  %08s  %08s  %08s " % fields)
-        print("-"*80)
+        print("-" * 80)
         for acl in acls:
-            vals = (acl["userName"], acl["create"], acl["read"], acl["update"], acl["delete"], acl["readACL"], acl["updateACL"])
+            vals = (acl["userName"], acl["create"], acl["read"],
+                    acl["update"], acl["delete"], acl["readACL"], acl["updateACL"])
             print("%015s   %08s  %08s  %08s  %08s  %08s  %08s " % vals)
     else:
         header_printed = False  # don't print header until we have at least one ACL
@@ -250,9 +259,10 @@ def main():
                 acl = f.getACL(username)
                 if not header_printed:
                     print("%015s   %08s  %08s  %08s  %08s  %08s  %08s " % fields)
-                    print("-"*80)
+                    print("-" * 80)
                     header_printed = True
-                vals = (acl["userName"], acl["create"], acl["read"], acl["update"], acl["delete"], acl["readACL"], acl["updateACL"])
+                vals = (acl["userName"], acl["create"], acl["read"],
+                        acl["update"], acl["delete"], acl["readACL"], acl["updateACL"])
                 print("%015s   %08s  %08s  %08s  %08s  %08s  %08s " % vals)
             except IOError as ioe:
                 if ioe.errno == 403:
@@ -266,6 +276,7 @@ def main():
                     abort(f"Unexpected error: {ioe}")
 
     f.close()
+
 
 if __name__ == "__main__":
     main()

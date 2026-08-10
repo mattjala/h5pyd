@@ -11,7 +11,6 @@
 ##############################################################################
 
 import numpy as np
-import math
 import logging
 
 import config
@@ -40,10 +39,10 @@ class TestSetItemDataset(TestCase):
         filename = self.getFileName("dset_broadcast")
         print("filename:", filename)
         f = h5py.File(filename, "w")
-        dset = f.create_dataset("dset", (4,5), dtype=np.int32)
+        dset = f.create_dataset("dset", (4, 5), dtype=np.int32)
         dset[...] = 42
         for i in range(4):
-            self.assertEqual(dset[i,i], 42)
+            self.assertEqual(dset[i, i], 42)
         f.close()
 
     def test_type_conversion(self):
@@ -55,7 +54,6 @@ class TestSetItemDataset(TestCase):
         for i in range(4):
             self.assertEqual(dset[i], 0.0 + i)
         f.close()
-
 
 
 if __name__ == '__main__':

@@ -25,7 +25,6 @@ from datetime import datetime
 
 class TestCreateDataset(TestCase):
 
-
     def test_create_simple_dset(self):
         filename = self.getFileName("create_simple_dset")
         print("filename:", filename)
@@ -45,7 +44,7 @@ class TestCreateDataset(TestCase):
         self.assertEqual(len(dset.maxshape), 2)
         self.assertEqual(dset.maxshape[0], 40)
         self.assertEqual(dset.maxshape[1], 80)
-        self.assertEqual(dset[0,0], 0)
+        self.assertEqual(dset[0, 0], 0)
 
         dset_ref = f['/simple_dset']
         self.assertTrue(dset_ref is not None)
@@ -63,11 +62,7 @@ class TestCreateDataset(TestCase):
 
         # try with chunk=True
         dset_chunked = f.create_dataset('chunked_dset', dims, dtype='f4', chunks=True)
-        if config.get('use_h5py') or (isinstance(f.id.id, str) and f.id.id.startswith("g-")):
-            self.assertTrue(dset_chunked.chunks)
-        else:
-            # h5serv not reporting chunks
-            self.assertTrue(dset_chunked.chunks is None)
+        self.assertTrue(dset_chunked.chunks)
 
         f.close()
 
@@ -76,9 +71,6 @@ class TestCreateDataset(TestCase):
         filename = self.getFileName("create_float16_dset")
         print("filename:", filename)
         f = h5py.File(filename, "w")
-        if not config.get('use_h5py') and isinstance(f.id.id, str) and not f.id.id.startswith("g-"):
-            # Float16 not supported with h5serv
-            return
 
         nrows = 4
         ncols = 8
@@ -95,22 +87,22 @@ class TestCreateDataset(TestCase):
         self.assertEqual(len(dset.maxshape), 2)
         self.assertEqual(dset.maxshape[0], nrows)
         self.assertEqual(dset.maxshape[1], ncols)
-        self.assertEqual(dset[0,0], 0)
+        self.assertEqual(dset[0, 0], 0)
 
-        arr = np.zeros((nrows,ncols), dtype="f2")
+        arr = np.zeros((nrows, ncols), dtype="f2")
         for i in range(nrows):
             for j in range(ncols):
-                val  = float(i) * 10.0 + float(j)/10.0
-                arr[i,j] = val
+                val = float(i) * 10.0 + float(j) / 10.0
+                arr[i, j] = val
 
         # write entire array to dataset
         dset[...] = arr
 
         arr = dset[...]  # read back
-        val = arr[2,4]   # test one value
+        # test one value
+        val = float(arr[2, 4])   # convert to float since np.float16 types not comparable
         self.assertTrue(val > 20.4 - 0.01)
         self.assertTrue(val < 20.4 + 0.01)
-
 
         f.close()
 
@@ -139,10 +131,6 @@ class TestCreateDataset(TestCase):
         filename = self.getFileName("fillvalue_char_dset")
         print("filename:", filename)
         f = h5py.File(filename, "w")
-        if not config.get('use_h5py') and isinstance(f.id.id, str) and not f.id.id.startswith("g-"):
-            # the following is failing on h5serv
-            f.close()
-            return
 
         dims = (6, 3)
         dtype = np.dtype("S1")
@@ -162,12 +150,10 @@ class TestCreateDataset(TestCase):
         self.assertEqual(dset.shape[1], 3)
         self.assertEqual(str(dset.dtype), '|S1')
         self.assertEqual(dset.fillvalue, b'X')
-        self.assertEqual(dset[0,0], b'a')
-        self.assertEqual(dset[5,2], b'z')
-
+        self.assertEqual(dset[0, 0], b'a')
+        self.assertEqual(dset[5, 2], b'z')
 
         f.close()
-
 
     def test_simple_1d_dset(self):
         filename = self.getFileName("simple_1d_dset")
@@ -198,7 +184,6 @@ class TestCreateDataset(TestCase):
         # Write 2's to the first five elements
         dset[0:5] = [2,] * 5
         vals = dset[:]
-
 
         f.close()
 
@@ -254,7 +239,6 @@ class TestCreateDataset(TestCase):
             self.assertEqual(dset.id.id, dset_ref.id.id)
             # Check dataset's last modified time
             self.assertTrue(isinstance(dset.modified, datetime))
-            #self.assertEqual(dset.modified.tzname(), six.u('UTC'))
 
         f.close()
 
@@ -270,7 +254,7 @@ class TestCreateDataset(TestCase):
         arr = np.random.rand(dims[0], dims[1])
 
         dset = f.create_dataset('simple_dset_gzip', data=arr, dtype='f8',
-            compression='gzip', compression_opts=9)
+                                compression='gzip', compression_opts=9)
 
         self.assertEqual(dset.name, "/simple_dset_gzip")
         self.assertTrue(isinstance(dset.shape, tuple))
@@ -293,10 +277,9 @@ class TestCreateDataset(TestCase):
         else:
             self.assertEqual(chunks[0], 20)
             self.assertEqual(chunks[1], 40)
-        if isinstance(f.id.id, str) and f.id.id.startswith("g-"):
-            # h5serv not setting this
-            self.assertEqual(dset.compression, 'gzip')
-            self.assertEqual(dset.compression_opts, 9)
+
+        self.assertEqual(dset.compression, 'gzip')
+        self.assertEqual(dset.compression_opts, 9)
         self.assertFalse(dset.shuffle)
 
         dset_ref = f['/simple_dset_gzip']
@@ -306,7 +289,6 @@ class TestCreateDataset(TestCase):
             self.assertEqual(dset.id.id, dset_ref.id.id)
             # Check dataset's last modified time
             self.assertTrue(isinstance(dset.modified, datetime))
-            #self.assertEqual(dset.modified.tzname(), six.u('UTC'))
 
         f.close()
 
@@ -317,7 +299,7 @@ class TestCreateDataset(TestCase):
         f = h5py.File(filename, "w")
 
         if config.get("use_h5py"):
-            return # lz4 not supported with h5py
+            return  # lz4 not supported with h5py
 
         if "lz4" not in f.compressors:
             print("lz4 not supproted")
@@ -329,7 +311,7 @@ class TestCreateDataset(TestCase):
         arr = np.random.rand(dims[0], dims[1])
 
         dset = f.create_dataset('simple_dset_lz4', data=arr, dtype='i4',
-            compression='lz4', compression_opts=5)
+                                compression='lz4', compression_opts=5)
 
         self.assertEqual(dset.name, "/simple_dset_lz4")
         self.assertTrue(isinstance(dset.shape, tuple))
@@ -363,7 +345,6 @@ class TestCreateDataset(TestCase):
             self.assertEqual(dset.id.id, dset_ref.id.id)
             # Check dataset's last modified time
             self.assertTrue(isinstance(dset.modified, datetime))
-            #self.assertEqual(dset.modified.tzname(), six.u('UTC'))
 
         f.close()
 
@@ -377,9 +358,9 @@ class TestCreateDataset(TestCase):
 
         # create some test data
         arr = np.random.rand(dims[0], dims[1])
-        kwds = {"chunks": (4,8)}
+        kwds = {"chunks": (4, 8)}
         dset = f.create_dataset('simple_dset_gzip_shuffle', data=arr, dtype='f8',
-            compression='gzip', shuffle=True, compression_opts=9, **kwds)
+                                compression='gzip', shuffle=True, compression_opts=9, **kwds)
 
         self.assertEqual(dset.name, "/simple_dset_gzip_shuffle")
         self.assertTrue(isinstance(dset.shape, tuple))
@@ -395,8 +376,8 @@ class TestCreateDataset(TestCase):
         chunks = dset.chunks  # chunk layout auto-generated
         self.assertTrue(isinstance(chunks, tuple))
         self.assertEqual(len(chunks), 2)
-        #self.assertEqual(dset.compression, 'gzip')
-        #self.assertEqual(dset.compression_opts, 9)
+        # self.assertEqual(dset.compression, 'gzip')
+        # self.assertEqual(dset.compression_opts, 9)
         self.assertTrue(dset.shuffle)
 
         dset_ref = f['/simple_dset_gzip_shuffle']
@@ -406,7 +387,6 @@ class TestCreateDataset(TestCase):
             self.assertEqual(dset.id.id, dset_ref.id.id)
             # Check dataset's last modified time
             self.assertTrue(isinstance(dset.modified, datetime))
-            #self.assertEqual(dset.modified.tzname(), six.u('UTC'))
 
         f.close()
 
@@ -430,13 +410,12 @@ class TestCreateDataset(TestCase):
 
         self.assertEqual(dset[0], False)
 
-
         vals = dset[:]  # read back
         for i in range(10):
             self.assertEqual(vals[i], False)
 
         # Write True's to the first five elements
-        dset[0:5] = [True,]*5
+        dset[0:5] = [True,] * 5
 
         dset = None
         dset = f["/bool_dset"]
@@ -444,7 +423,7 @@ class TestCreateDataset(TestCase):
         # read back
         vals = dset[...]
         for i in range(5):
-            if i<5:
+            if i < 5:
                 self.assertEqual(vals[i], True)
             else:
                 self.assertEqual(vals[i], False)
@@ -472,7 +451,7 @@ class TestCreateDataset(TestCase):
         self.assertEqual(len(dset.maxshape), 2)
         self.assertEqual(dset.maxshape[0], 40)
         self.assertEqual(dset.maxshape[1], 80)
-        self.assertEqual(dset[0,0], 0)
+        self.assertEqual(dset[0, 0], 0)
 
         self.assertEqual(len(f), 1)
 
@@ -488,7 +467,7 @@ class TestCreateDataset(TestCase):
 
         self.assertEqual(len(f), 1)
 
-        try: 
+        try:
             f.require_dataset('dset', dims, dtype='f4', exact=True)
             self.assertTrue(False)  # exception expected
         except TypeError:
@@ -514,14 +493,14 @@ class TestCreateDataset(TestCase):
             self.assertEqual(len(dset.maxshape), 2)
             self.assertEqual(dset.maxshape[0], 40)
             self.assertEqual(dset.maxshape[1], 80)
-            self.assertEqual(dset[0,0], 0)
+            self.assertEqual(dset[0, 0], 0)
 
         dims = (40, 80)
         dset = f.create_dataset('simple_dset', dims, dtype='f4')
 
         self.assertEqual(dset.name, '/simple_dset')
         check_props(dset)
-        
+
         dset_copy = f.create_dataset_like('similar_dset', dset)
         self.assertEqual(dset_copy.name, '/similar_dset')
         check_props(dset_copy)
@@ -565,7 +544,7 @@ class TestCreateDataset(TestCase):
             self.assertEqual(len(dset.maxshape), 2)
             self.assertEqual(dset.maxshape[0], 40)
             self.assertEqual(dset.maxshape[1], 80)
-            self.assertEqual(dset[0,0], 0)
+            self.assertEqual(dset[0, 0], 0)
 
         filename = self.getFileName("create_anon_dset")
         print("filename:", filename)
@@ -585,7 +564,6 @@ class TestCreateDataset(TestCase):
             if isinstance(f.id.id, str) and f.id.id.startswith("g-"):
                 self.assertEqual(dset.num_chunks, 0)
                 self.assertEqual(dset.allocated_size, 0)
-
 
         f.close()
 
@@ -608,11 +586,10 @@ class TestCreateDataset(TestCase):
                 print(f"didn't expect to get: {dset}")
                 self.asertTrue(False)
             except IOError:
-                pass # expected
-        f.close()     
+                pass  # expected
+        f.close()
 
 
-        
 if __name__ == '__main__':
     loglevel = logging.ERROR
     logging.basicConfig(format='%(asctime)s %(message)s', level=loglevel)

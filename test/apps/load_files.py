@@ -15,7 +15,7 @@ import os
 import sys
 import config
 import h5pyd
-
+from platform import system
 #
 # Main
 #
@@ -36,7 +36,7 @@ data_dir = "data"
 out_dir = "out"
 test_file_http_path = config.get("test_file_http_path")
 
-parent =  h5pyd.Folder(test_folder)
+parent = h5pyd.Folder(test_folder)
 filenames = config.get_test_filenames()
 
 if not os.path.exists(data_dir):
@@ -48,17 +48,28 @@ if not os.path.exists(out_dir):
     os.mkdir(out_dir)
 
 for filename in filenames:
+    if filename == "undecodable_attr.h5":
+        # TBD: need to update hsload to use base64 encoding rather
+        # than urlescapping with HSDS v0.9
+        continue
     domain_path = os.path.join(test_folder, filename)
     hdf5_path = os.path.join(data_dir, filename)
     if filename not in data_dir:
         # check to see if the file has already been downloaded
         if not os.path.isfile(hdf5_path):
-            # wget from S3
+            # get from S3
             http_path = test_file_http_path + filename
             print("downloading:", http_path)
-            rc = os.system(f"wget -q https://s3.amazonaws.com/hdfgroup/data/hdf5test/{filename} -P {data_dir}")
+
+            curl_exe = "curl.exe" if system() == "Windows" else "curl"
+
+            get_cmd = f"{curl_exe} -o {filename}\
+                            https://s3.amazonaws.com/hdfgroup/data/hdf5test/{filename}\
+                            --create-dirs --output-dir {data_dir}"
+
+            rc = os.system(f"{get_cmd}")
             if rc != 0:
-                sys.exit("Failed to retreive test data file")
+                sys.exit(f"Failed to retreive test data file with error code {rc}")
     # run hsload for each file
     print(f"running hsload for {hdf5_path} to {test_folder}")
     rc = os.system(f"python ../../h5pyd/_apps/hsload.py {hdf5_path} {test_folder}")
@@ -69,4 +80,3 @@ for filename in filenames:
     if rc != 0:
         sys.exit(f"Failed to hsget {filename}")
 print("load_files done")
-    
